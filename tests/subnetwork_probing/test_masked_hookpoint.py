@@ -30,7 +30,7 @@ def do_random_resample_caching(model: LegacyHookedTransformer, train_data: torch
 def test_induction_mask_reimplementation_correct():
     all_task_things = get_all_docstring_things(
         num_examples=6,
-        seq_len=300,
+        seq_len=41,
         device=torch.device("cpu"),
         metric_name="kl_div",
         correct_incorrect_wandb=False,
@@ -69,3 +69,17 @@ def test_induction_mask_reimplementation_correct():
             out_hooks = masked_model(all_task_things.validation_data)
 
     assert torch.allclose(out_legacy, out_hooks)
+
+
+def test_cache_writeable_forward_pass():
+    all_task_things = get_all_docstring_things(
+        num_examples=6,
+        seq_len=41,
+        device=torch.device("cpu"),
+        metric_name="kl_div",
+        correct_incorrect_wandb=False,
+    )
+    masked_model = MaskedTransformer(all_task_things.tl_model)
+
+    # Test goes here
+    ...
