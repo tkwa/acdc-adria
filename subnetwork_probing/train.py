@@ -12,13 +12,13 @@ from transformer_lens import HookedTransformer
 from transformer_lens.ActivationCache import ActivationCache
 from transformer_lens.hook_points import HookPoint
 
-from acdc.acdc_utils import reset_network
-from acdc.docstring.utils import AllDataThings, get_all_docstring_things
+from acdc.acdc_utils import filter_nodes, get_edge_stats, get_node_stats, get_present_nodes, reset_network
+from acdc.docstring.utils import AllDataThings, get_all_docstring_things, get_docstring_subgraph_true_edges
 from acdc.greaterthan.utils import get_all_greaterthan_things
 from acdc.induction.utils import get_all_induction_things
 from acdc.ioi.utils import get_all_ioi_things
-from acdc.TLACDCEdge import Edge, EdgeType, TorchIndex
 from acdc.TLACDCCorrespondence import TLACDCCorrespondence
+from acdc.TLACDCEdge import Edge, EdgeType, TorchIndex
 from acdc.TLACDCInterpNode import TLACDCInterpNode
 from acdc.tracr_task.utils import get_all_tracr_things
 
@@ -380,9 +380,10 @@ parser.add_argument("--reset-subject", type=int, default=0)
 parser.add_argument("--seed", type=int, default=random.randint(0, 2**31 - 1), help="Random seed (default: random)")
 parser.add_argument("--num-examples", type=int, default=50)
 parser.add_argument("--seq-len", type=int, default=300)
-parser.add_argument("--n-loss-average-runs", type=int, default=20)
+parser.add_argument("--n-loss-average-runs", type=int, default=4)
 parser.add_argument("--task", type=str, required=True)
 parser.add_argument("--torch-num-threads", type=int, default=0, help="How many threads to use for torch (0=all)")
+parser.add_argument("--print-stats", type=int, default=1, required=False)
 
 if __name__ == "__main__":
     args = parser.parse_args()
@@ -423,6 +424,7 @@ if __name__ == "__main__":
             metric_name=args.loss_type,
             correct_incorrect_wandb=True,
         )
+        get_true_edges = get_docstring_subgraph_true_edges
     elif args.task == "greaterthan":
         all_task_things = get_all_greaterthan_things(
             num_examples=args.num_examples,
@@ -452,4 +454,22 @@ if __name__ == "__main__":
     to_log_dict["percentage_binary"] = percentage_binary
 
     wandb.log(to_log_dict)
+    if args.print_stats:
+        canonical_circuit_subgraph = TLACDCCorrespondence.setup_from_model(masked_model.model, use_pos_embed=False)
+        d_trues = set(get_true_edges())
+
+        for (receiver_name, receiver_index, sender_name, sender_index), edge in canonical_circuit_subgraph.all_edges().items():
+            key =(receiver_name, receiver_index.hashable_tuple, sender_name, sender_index.hashable_tuple)
+            edge.present = (key in d_trues)
+
+        stats = get_node_stats(ground_truth=canonical_circuit_subgraph, recovered=corr)
+        tpr = stats["true positive"] / (stats["true positive"] + stats["false negative"])
+        fpr = stats["false positive"] / (stats["false positive"] + stats["true negative"])
+        print(f"Node TPR: {tpr:.3f}. Node FPR: {fpr:.3f}")
+
+        stats = get_edge_stats(ground_truth=canonical_circuit_subgraph, recovered=corr)
+        tpr = stats["true positive"] / (stats["true positive"] + stats["false negative"])
+        fpr = stats["false positive"] / (stats["false positive"] + stats["true negative"])
+        print(f"Edge TPR: {tpr:.3f}. Edge FPR: {fpr:.3f}")
+
     wandb.finish()
