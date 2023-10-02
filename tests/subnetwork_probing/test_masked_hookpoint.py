@@ -2,13 +2,30 @@ import functools
 import torch
 from typing import Iterable, Tuple
 from acdc.docstring.utils import get_all_docstring_things
-from subnetwork_probing.train import do_random_resample_caching, MaskedTransformer
-from subnetwork_probing.transformer_lens.transformer_lens.HookedTransformer import HookedTransformer
-from subnetwork_probing.transformer_lens.transformer_lens.HookedTransformerConfig import HookedTransformerConfig
+from subnetwork_probing.train import MaskedTransformer
+from subnetwork_probing.transformer_lens.transformer_lens.HookedTransformer import HookedTransformer as LegacyHookedTransformer
+from subnetwork_probing.transformer_lens.transformer_lens.HookedTransformerConfig import HookedTransformerConfig as LegacyHookedTransformerConfig
 
 from transformer_lens.hook_points import HookPoint
 from transformer_lens.ActivationCache import ActivationCache
 
+def do_random_resample_caching(model: LegacyHookedTransformer, train_data: torch.Tensor) -> torch.Tensor:
+    for layer in model.blocks:
+        layer.attn.hook_q.is_caching = True
+        layer.attn.hook_k.is_caching = True
+        layer.attn.hook_v.is_caching = True
+        layer.hook_mlp_out.is_caching = True
+
+    with torch.no_grad():
+        outs = model(train_data)
+
+    for layer in model.blocks:
+        layer.attn.hook_q.is_caching = False
+        layer.attn.hook_k.is_caching = False
+        layer.attn.hook_v.is_caching = False
+        layer.hook_mlp_out.is_caching = False
+
+    return outs
 
 def test_induction_mask_reimplementation_correct():
     all_task_things = get_all_docstring_things(
@@ -30,9 +47,9 @@ def test_induction_mask_reimplementation_correct():
         if kwarg_string in kwargs:
             del kwargs[kwarg_string]
 
-    cfg = HookedTransformerConfig(**kwargs)
+    cfg = LegacyHookedTransformerConfig(**kwargs)
     # Create a model using the old version of SP, which uses MaskedHookPoints and a modified TransformerLens
-    legacy_model = HookedTransformer(cfg, is_masked=True)
+    legacy_model = LegacyHookedTransformer(cfg, is_masked=True)
     legacy_model.load_state_dict(all_task_things.tl_model.state_dict(), strict=False)
 
     model = MaskedTransformer(all_task_things.tl_model)
