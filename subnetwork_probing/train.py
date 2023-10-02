@@ -1,5 +1,7 @@
 import argparse
-from typing import List, Optional
+import contextlib
+from typing import Callable, ContextManager, Iterator, List, Optional
+import math
 import random
 from copy import deepcopy
 from functools import partial
@@ -33,6 +35,10 @@ from subnetwork_probing.transformer_lens.transformer_lens.HookedTransformer impo
 from subnetwork_probing.transformer_lens.transformer_lens.HookedTransformerConfig import HookedTransformerConfig
 from subnetwork_probing.transformer_lens.transformer_lens.ioi_dataset import IOIDataset
 import wandb
+
+from transformer_lens.hook_points import HookPoint
+from transformer_lens.ActivationCache import ActivationCache
+from transformer_lens import HookedTransformer as NewHookedTransformer
 
 
 def iterative_correspondence_from_mask(
@@ -100,6 +106,88 @@ def log_plotly_bar_chart(x: List[str], y: List[float]) -> None:
 
     fig = go.Figure(data=[go.Bar(x=x, y=y)])
     wandb.log({"mask_scores": fig})
+
+
+class MaskedTransformer(torch.nn.Module):
+    model: NewHookedTransformer
+    cache: ActivationCache
+    mask_logits: torch.nn.ParameterList
+    mask_logits_names: List[str]
+    _mask_logits_dict: Dict[str, torch.nn.Parameter]
+
+    def __init__(self, model, beta=2 / 3, gamma=-0.1, zeta=1.1, mask_init_p=0.9):
+        super().__init__()
+
+        self.model = model
+        self.mask_logits = torch.nn.ParameterList()
+        self.mask_logits_names = []
+        self._mask_logits_dict = {}
+        self.cache = ActivationCache({}, self.model)
+        # Hyperparameters
+        self.beta = beta
+        self.gamma = gamma
+        self.zeta = zeta
+        self.mask_init_p = mask_init_p
+
+        # Copied from subnetwork probing code. Similar to log odds (but not the same)
+        p = (self.mask_init_p - self.gamma) / (self.zeta - self.gamma)
+        mask_init_constant = math.log(p / (1 - p))
+
+        for layer_index, layer in enumerate(model.blocks):
+            # MLP: turn on/off
+            mask_name = f"blocks.{layer_index}.hook_mlp_out"
+            self.mask_logits.append(torch.nn.Parameter(torch.zeros((1,)) + mask_init_constant))
+            self.mask_logits_names.append(mask_name)
+            self._mask_logits_dict[mask_name] = self.mask_logits[-1]
+
+            # QKV: turn each head on/off
+            for q_k_v in ["q", "k", "v"]:
+                mask_name = f"blocks.{layer_index}.attn.hook_{q_k_v}"
+                self.mask_logits.append(torch.nn.Parameter(
+                    torch.zeros((model.cfg.n_heads, 1)) + mask_init_constant
+                ))
+                self.mask_logits_names.append(mask_name)
+                self._mask_logits_dict[mask_name] = self.mask_logits[-1]
+
+    def sample_mask(self, mask_name):
+        """Samples a binary-ish mask from the mask_scores for the particular `mask_name` activation"""
+        mask_scores = self._mask_logits_dict[mask_name]
+        uniform_sample = torch.zeros_like(mask_scores).uniform_().clamp_(0.0001, 0.9999)
+        s = torch.sigmoid((uniform_sample.log() - (1 - uniform_sample).log() + mask_scores) / self.beta)
+        s_bar = s * (self.zeta - self.gamma) + self.gamma
+        mask = s_bar.clamp(min=0.0, max=1.0)
+        return mask
+
+    def mask_logits_names_filter(self, name):
+        return name in self.mask_logits_names
+
+    def do_random_resample_caching(self, patch_data) -> torch.Tensor:
+        # Only cache the tensors needed to fill the masked out positions
+        model_out, self.cache = self.model.run_with_cache(
+            patch_data, names_filter=self.mask_logits_names_filter, return_cache_object=True
+        )
+        return model_out
+
+    def do_zero_caching(self):
+        """Caches zero for every possible mask point.
+
+        Note: the shape of this is the mask shape, instead of the activation shape like for
+        `do_random_resample_caching`; this is ultimately fine due to broadcasting.
+        """
+        self.cache = ActivationCache(
+            {name: torch.zeros_like(scores) for name, scores in self._mask_logits_dict.items()}, self.model
+        )
+
+    def activation_mask_hook(self, hook_point_out: torch.Tensor, hook: HookPoint):
+        mask = self.sample_mask(hook.name)
+        out = mask * hook_point_out + (1 - mask) * self.cache[hook.name]
+        return out
+
+    def fwd_hooks(self) -> List[Tuple[str, Callable]]:
+        return [(n, self.activation_mask_hook) for n in self.mask_logits_names]
+
+    def with_fwd_hooks(self) -> ContextManager[NewHookedTransformer]:
+        return self.model.hooks(self.fwd_hooks())
 
 
 def visualize_mask(model: HookedTransformer) -> tuple[int, list[TLACDCInterpNode]]:
