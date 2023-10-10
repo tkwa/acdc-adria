@@ -234,26 +234,36 @@ def visualize_mask(masked_model: MaskedTransformer) -> tuple[int, list[TLACDCInt
     return node_count, nodes_to_mask
 
 
-def print_stats(corr, d_trues, canonical_circuit_subgraph):
+def print_stats(corr, d_trues, canonical_circuit_subgraph, wandb_log=True):
     for (receiver_name, receiver_index, sender_name, sender_index), edge in canonical_circuit_subgraph.all_edges().items():
         key =(receiver_name, receiver_index.hashable_tuple, sender_name, sender_index.hashable_tuple)
         edge.present = (key in d_trues)
     stats = get_node_stats(ground_truth=canonical_circuit_subgraph, recovered=corr)
-    tpr = stats["true positive"] / (stats["true positive"] + stats["false negative"])
-    fpr = stats["false positive"] / (stats["false positive"] + stats["true negative"])
-    print(f"Node TPR: {tpr:.3f}. Node FPR: {fpr:.3f}")
+    node_tpr = stats["true positive"] / (stats["true positive"] + stats["false negative"])
+    node_fpr = stats["false positive"] / (stats["false positive"] + stats["true negative"])
+    print(f"Node TPR: {node_tpr:.3f}. Node FPR: {node_fpr:.3f}")
 
     stats = get_edge_stats(ground_truth=canonical_circuit_subgraph, recovered=corr)
-    tpr = stats["true positive"] / (stats["true positive"] + stats["false negative"])
-    fpr = stats["false positive"] / (stats["false positive"] + stats["true negative"])
-    print(f"Edge TPR: {tpr:.3f}. Edge FPR: {fpr:.3f}")
+    edge_tpr = stats["true positive"] / (stats["true positive"] + stats["false negative"])
+    edge_fpr = stats["false positive"] / (stats["false positive"] + stats["true negative"])
+    print(f"Edge TPR: {edge_tpr:.3f}. Edge FPR: {edge_fpr:.3f}")
+
+    if wandb_log:
+        wandb.log(
+            {
+                "node_tpr": node_tpr,
+                "node_fpr": node_fpr,
+                "edge_tpr": edge_tpr,
+                "edge_fpr": edge_fpr,
+            }
+        )
 
 def train_sp(
     args,
     masked_model: MaskedTransformer,
     all_task_things: AllDataThings,
     to_log_dict: dict,
-    print_every = 2,
+    print_every:int=2,
 ):
     epochs = args.epochs
     lambda_reg = args.lambda_reg
