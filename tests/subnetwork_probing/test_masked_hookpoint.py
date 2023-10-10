@@ -82,4 +82,20 @@ def test_cache_writeable_forward_pass():
     masked_model = MaskedTransformer(all_task_things.tl_model)
 
     # Test goes here
-    ...
+
+    # Run the model once on an unmodified cache
+    masked_model.do_random_resample_caching(all_task_things.validation_patch_data)
+    with masked_model.with_fwd_hooks() as hooked_model:
+        out1 = hooked_model(all_task_things.validation_data)
+    
+    # Now modify the cache and do it again
+    masked_model.do_random_resample_caching(all_task_things.validation_patch_data)
+    for name in masked_model.cache:
+        # We can't modify ActivationCache items, so we modify the underlying dict.
+        masked_model.cache.cache_dict[name] = 1 - masked_model.cache[name]
+
+    with masked_model.with_fwd_hooks() as hooked_model:
+        out2 = hooked_model(all_task_things.validation_data)
+
+    # We don't use allclose; the values should be exactly the same
+    assert (out1 == out2).all()
