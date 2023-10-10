@@ -84,12 +84,14 @@ def test_cache_writeable_forward_pass():
     # Test goes here
 
     # Run the model once on an unmodified cache
+    rng_state = torch.random.get_rng_state()
     masked_model.do_random_resample_caching(all_task_things.validation_patch_data)
     context_args = dict(ablation='resample', ablation_data=all_task_things.validation_patch_data)
     with masked_model.with_fwd_hooks_and_new_cache(**context_args) as hooked_model:
         out1 = hooked_model(all_task_things.validation_data)
     
     # Now modify the cache and do it again
+    torch.random.set_rng_state(rng_state)
     masked_model.do_random_resample_caching(all_task_things.validation_patch_data)
     for name in masked_model.cache:
         # We can't modify ActivationCache items, so we modify the underlying dict.
