@@ -234,10 +234,26 @@ def visualize_mask(masked_model: MaskedTransformer) -> tuple[int, list[TLACDCInt
     return node_count, nodes_to_mask
 
 
+def print_stats(corr, d_trues, canonical_circuit_subgraph):
+    for (receiver_name, receiver_index, sender_name, sender_index), edge in canonical_circuit_subgraph.all_edges().items():
+        key =(receiver_name, receiver_index.hashable_tuple, sender_name, sender_index.hashable_tuple)
+        edge.present = (key in d_trues)
+    stats = get_node_stats(ground_truth=canonical_circuit_subgraph, recovered=corr)
+    tpr = stats["true positive"] / (stats["true positive"] + stats["false negative"])
+    fpr = stats["false positive"] / (stats["false positive"] + stats["true negative"])
+    print(f"Node TPR: {tpr:.3f}. Node FPR: {fpr:.3f}")
+
+    stats = get_edge_stats(ground_truth=canonical_circuit_subgraph, recovered=corr)
+    tpr = stats["true positive"] / (stats["true positive"] + stats["false negative"])
+    fpr = stats["false positive"] / (stats["false positive"] + stats["true negative"])
+    print(f"Edge TPR: {tpr:.3f}. Edge FPR: {fpr:.3f}")
+
 def train_sp(
     args,
     masked_model: MaskedTransformer,
     all_task_things: AllDataThings,
+    to_log_dict: dict,
+    print_every = 2,
 ):
     epochs = args.epochs
     lambda_reg = args.lambda_reg
@@ -281,6 +297,10 @@ def train_sp(
     else:
         masked_model.do_random_resample_caching(all_task_things.validation_patch_data)
 
+    # Get canonical subgraph so we can print TPR, FPR
+    canonical_circuit_subgraph = TLACDCCorrespondence.setup_from_model(masked_model.model, use_pos_embed=False)
+    d_trues = set(get_true_edges())
+
     for epoch in tqdm(range(epochs)):  # tqdm.notebook.tqdm(range(epochs)):
         masked_model.train()
         trainer.zero_grad()
@@ -293,7 +313,12 @@ def train_sp(
 
         trainer.step()
 
-    number_of_nodes, nodes_to_mask = visualize_mask(masked_model)
+        if epoch % print_every == 0 and args.print_stats:
+            number_of_nodes, nodes_to_mask = visualize_mask(masked_model)
+            corr, _ = iterative_correspondence_from_mask(masked_model.model, nodes_to_mask)
+            print_stats(corr, d_trues, canonical_circuit_subgraph)
+            
+
     wandb.log(
         {
             "regularisation_loss": regularizer_term.item(),
@@ -337,13 +362,13 @@ def train_sp(
 
         print(f"Final test metric: {test_specific_metrics}")
 
-        to_log_dict = dict(
+        to_log_dict.update(
             number_of_nodes=number_of_nodes,
             specific_metric=specific_metric_term,
             nodes_to_mask=nodes_to_mask,
             **test_specific_metrics,
         )
-    return masked_model, to_log_dict
+    return masked_model
 
 
 def proportion_of_binary_scores(model: MaskedTransformer) -> float:
@@ -439,37 +464,21 @@ if __name__ == "__main__":
 
     masked_model.freeze_weights()
     print("Finding subnetwork...")
-    masked_model, to_log_dict = train_sp(
+    to_log_dict = dict()
+    masked_model = train_sp(
         args=args,
         masked_model=masked_model,
         all_task_things=all_task_things,
+        to_log_dict=to_log_dict,
     )
 
-    corr, _ = iterative_correspondence_from_mask(masked_model.model, to_log_dict["nodes_to_mask"])
     percentage_binary = proportion_of_binary_scores(masked_model)
 
     # Update dict with some different things
     to_log_dict["nodes_to_mask"] = list(map(str, to_log_dict["nodes_to_mask"]))
-    to_log_dict["number_of_edges"] = corr.count_no_edges()
+    # to_log_dict["number_of_edges"] = corr.count_no_edges() TODO
     to_log_dict["percentage_binary"] = percentage_binary
 
     wandb.log(to_log_dict)
-    if args.print_stats:
-        canonical_circuit_subgraph = TLACDCCorrespondence.setup_from_model(masked_model.model, use_pos_embed=False)
-        d_trues = set(get_true_edges())
-
-        for (receiver_name, receiver_index, sender_name, sender_index), edge in canonical_circuit_subgraph.all_edges().items():
-            key =(receiver_name, receiver_index.hashable_tuple, sender_name, sender_index.hashable_tuple)
-            edge.present = (key in d_trues)
-
-        stats = get_node_stats(ground_truth=canonical_circuit_subgraph, recovered=corr)
-        tpr = stats["true positive"] / (stats["true positive"] + stats["false negative"])
-        fpr = stats["false positive"] / (stats["false positive"] + stats["true negative"])
-        print(f"Node TPR: {tpr:.3f}. Node FPR: {fpr:.3f}")
-
-        stats = get_edge_stats(ground_truth=canonical_circuit_subgraph, recovered=corr)
-        tpr = stats["true positive"] / (stats["true positive"] + stats["false negative"])
-        fpr = stats["false positive"] / (stats["false positive"] + stats["true negative"])
-        print(f"Edge TPR: {tpr:.3f}. Edge FPR: {fpr:.3f}")
 
     wandb.finish()
