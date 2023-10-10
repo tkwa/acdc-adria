@@ -65,7 +65,7 @@ def test_induction_mask_reimplementation_correct():
         out_legacy = legacy_model(all_task_things.validation_data)
 
         torch.set_rng_state(rng_state)
-        with model.with_fwd_hooks() as masked_model:
+        with model.with_fwd_hooks_and_new_cache() as masked_model:
             out_hooks = masked_model(all_task_things.validation_data)
 
     assert torch.allclose(out_legacy, out_hooks)
@@ -85,7 +85,8 @@ def test_cache_writeable_forward_pass():
 
     # Run the model once on an unmodified cache
     masked_model.do_random_resample_caching(all_task_things.validation_patch_data)
-    with masked_model.with_fwd_hooks() as hooked_model:
+    context_args = dict(ablation='resample', ablation_data=all_task_things.validation_patch_data)
+    with masked_model.with_fwd_hooks_and_new_cache(**context_args) as hooked_model:
         out1 = hooked_model(all_task_things.validation_data)
     
     # Now modify the cache and do it again
@@ -94,7 +95,7 @@ def test_cache_writeable_forward_pass():
         # We can't modify ActivationCache items, so we modify the underlying dict.
         masked_model.cache.cache_dict[name] = 1 - masked_model.cache[name]
 
-    with masked_model.with_fwd_hooks() as hooked_model:
+    with masked_model.with_fwd_hooks_and_new_cache(**context_args) as hooked_model:
         out2 = hooked_model(all_task_things.validation_data)
 
     # We don't use allclose; the values should be exactly the same
