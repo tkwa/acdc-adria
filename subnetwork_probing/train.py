@@ -177,7 +177,13 @@ class MaskedTransformer(torch.nn.Module):
     def fwd_hooks(self) -> List[Tuple[str, Callable]]:
         return [(n, self.activation_mask_hook) for n in self.mask_logits_names]
 
-    def with_fwd_hooks(self) -> ContextManager[HookedTransformer]:
+    def with_fwd_hooks_and_new_cache(self, ablation='resample', ablation_data=None) -> ContextManager[HookedTransformer]:
+        assert ablation in ['zero', 'resample']
+        if ablation == 'zero':
+            self.do_zero_caching()
+        else:
+            assert ablation_data is not None
+            self.do_random_resample_caching(ablation_data)
         return self.model.hooks(self.fwd_hooks())
 
     def freeze_weights(self):
@@ -303,9 +309,9 @@ def train_sp(
 
 
     if args.zero_ablation:
-        masked_model.do_zero_caching()
+        context_args = dict(ablation='zero')
     else:
-        masked_model.do_random_resample_caching(all_task_things.validation_patch_data)
+        context_args = dict(ablation='resample', ablation_data=all_task_things.validation_patch_data)
 
     # Get canonical subgraph so we can print TPR, FPR
     canonical_circuit_subgraph = TLACDCCorrespondence.setup_from_model(masked_model.model, use_pos_embed=False)
@@ -315,7 +321,7 @@ def train_sp(
         masked_model.train()
         trainer.zero_grad()
 
-        with masked_model.with_fwd_hooks() as hooked_model:
+        with masked_model.with_fwd_hooks_and_new_cache(**context_args) as hooked_model:
             specific_metric_term = all_task_things.validation_metric(hooked_model(all_task_things.validation_data))
         regularizer_term = masked_model.regularization_loss()
         loss = specific_metric_term + regularizer_term * lambda_reg
@@ -349,7 +355,7 @@ def train_sp(
             masked_model.do_random_resample_caching(all_task_things.validation_patch_data)
 
         for _ in range(args.n_loss_average_runs):
-            with masked_model.with_fwd_hooks() as hooked_model:
+            with masked_model.with_fwd_hooks_and_new_cache(**context_args) as hooked_model:
                 specific_metric_term += all_task_things.validation_metric(
                     hooked_model(all_task_things.validation_data)
                 ).item()
@@ -366,7 +372,7 @@ def train_sp(
             test_specific_metric_term = 0.0
             # Test loss
             for _ in range(args.n_loss_average_runs):
-                with masked_model.with_fwd_hooks() as hooked_model:
+                with masked_model.with_fwd_hooks_and_new_cache(**context_args) as hooked_model:
                     test_specific_metric_term += fn(hooked_model(all_task_things.test_data)).item()
             test_specific_metrics[f"test_{k}"] = test_specific_metric_term
 
