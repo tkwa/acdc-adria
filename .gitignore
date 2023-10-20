@@ -10,6 +10,7 @@ histories/
 transformer_lens/media/
 profile*.json
 **/*.png
+!assets/acdc_finds_subgraph.png
 **/*.gv
 !experiments/results/canonical_circuits/*/layout.gv
 **/__pycache__
