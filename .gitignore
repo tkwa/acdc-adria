@@ -60,3 +60,5 @@ pts/
 **/.DS_Store
 
 ob-jupyter
+
+**/.pytest_cache
