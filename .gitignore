@@ -2,17 +2,17 @@ out.txt
 out2.txt
 out1.txt
 acdc.egg-info/
-*.sage.py
-*.pt
-*.pkl
+**/*.sage.py
+**/*.pt
+**/*.pkl
 better*.json
 histories/
 transformer_lens/media/
 profile*.json
-*.png
-*.gv
+**/*.png
+**/*.gv
 !experiments/results/canonical_circuits/*/layout.gv
-__pycache__
+**/__pycache__
 Testing_Notebook.ipynb
 
 scratch.py
