@@ -39,7 +39,7 @@ def main(TASKS: list[str], job: Optional[KubernetesJob], name: str, testing: boo
 
     commands: List[List[str]] = []
     for reset_network in [int(reset_networks)]:
-        for zero_ablation in [0, 1]:
+        for zero_ablation in [1]:
             for task in TASKS:
                 for metric in METRICS_FOR_TASK[task]:
                     if task.startswith("tracr"):
@@ -116,10 +116,10 @@ def main(TASKS: list[str], job: Optional[KubernetesJob], name: str, testing: boo
                             "subnetwork_probing/train.py",
                             f"--task={task}",
                             f"--lambda-reg={lambda_reg:.3f}",
-                            f"--wandb-name=agarriga-sp-{len(commands):05d}{'-optional' if task in ['induction', 'docstring'] else ''}",
+                            f"--wandb-name=sp-{task}-{len(commands):05d}",
                             "--wandb-project=induction-sp-replicate",
                             "--wandb-entity=remix_school-of-rock",
-                            "--wandb-group=tracr-shuffled-redo",
+                            "--wandb-group=cameraready-reset",
                             f"--device={device}",
                             f"--epochs={1 if testing else 10000}",
                             f"--zero-ablation={zero_ablation}",
@@ -145,12 +145,12 @@ def main(TASKS: list[str], job: Optional[KubernetesJob], name: str, testing: boo
     )
 
 if __name__ == "__main__":
-    for reset_networks in [False, True]:
-        for task in ["tracr-reverse"]:
+    for reset_networks in [True]:
+        for task in METRICS_FOR_TASK.keys():
             main(
                 [task],
                 KubernetesJob(
-                    container="ghcr.io/rhaps0dy/automatic-circuit-discovery:1.7.2",
+                    container="ghcr.io/arthurconmy/automatic-circuit-discovery:13057421",
                     cpu=4,
                     gpu=0 if task.startswith("tracr") else 1,
                     mount_training=False,

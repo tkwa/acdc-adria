@@ -28,7 +28,7 @@ def main(TASKS: list[str], group_name: str, run_name: str, testing: bool, use_ku
 
     commands: List[List[str]] = []
     for reset_network in [int(reset_networks)]:
-        for zero_ablation in [0]:
+        for zero_ablation in [1]:
             for task in TASKS:
                 for metric in METRICS_FOR_TASK[task]:
 
@@ -123,18 +123,18 @@ def main(TASKS: list[str], group_name: str, run_name: str, testing: bool, use_ku
         name="acdc-spreadsheet",
         job=None
         if not use_kubernetes
-        else KubernetesJob(container="ghcr.io/rhaps0dy/automatic-circuit-discovery:181999f", cpu=CPU, gpu=int(use_gpu)),
+        else KubernetesJob(container="ghcr.io/arthurconmy/automatic-circuit-discovery:13057421", cpu=CPU, gpu=int(use_gpu)),
         check_wandb=wandb_identifier,
         just_print_commands=False,
     )
 
 
 if __name__ == "__main__":
-    for reset_networks in [False]:
+    for reset_networks in [True]:
         main(
             TASKS=["ioi"],
-            group_name="abs-value",
-            run_name=f"agarriga-ioi-res{int(reset_networks)}-{{i:05d}}",
+            group_name="cameraready-reset-zero",
+            run_name=f"acdc-{{i:05d}}",
             testing=False,
             use_kubernetes=True,
             reset_networks=reset_networks,
