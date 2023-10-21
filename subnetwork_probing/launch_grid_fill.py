@@ -119,7 +119,7 @@ def main(TASKS: list[str], job: Optional[KubernetesJob], name: str, testing: boo
                             f"--wandb-name=sp-{task}-{len(commands):05d}",
                             "--wandb-project=induction-sp-replicate",
                             "--wandb-entity=remix_school-of-rock",
-                            "--wandb-group=cameraready-reset",
+                            "--wandb-group=cameraready-reset-zero",
                             f"--device={device}",
                             f"--epochs={1 if testing else 10000}",
                             f"--zero-ablation={zero_ablation}",

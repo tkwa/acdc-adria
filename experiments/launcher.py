@@ -92,7 +92,6 @@ def launch(commands: List[List[str]], name: str, job: Optional[KubernetesJob] = 
                     f"--gpu={job.gpu}",
                     "--login",
                     "--wandb",
-                    "--never-restart",
                     f"--command={command_str}",
                     "--working-dir=/Automatic-Circuit-Discovery",
                     "--shared-host-dir=/home/agarriga/.cache",
