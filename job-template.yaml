@@ -1,0 +1,35 @@
+# Generate with: touch jobs.yaml && rm jobs.yaml && python experiments/launch_spreadsheet.py  >> jobs.yaml && echo "---" >> jobs.yaml && python subnetwork_probing/launch_grid_fill.py >> jobs.yaml
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {NAME}
+  labels:
+    kueue.x-k8s.io/queue-name: farai
+spec:
+  ttlSecondsAfterFinished: 36000
+  template:
+    metadata:
+      name: {NAME}
+    spec:
+      priorityClassName: normal-batch
+      containers:
+      - name: dummy
+        image: {IMAGE}
+        command: {COMMAND}
+        resources:
+          # Request CPUs, limit memory and GPUs.
+          requests:
+            cpu: {CPU}
+          limits:
+            memory: "16G"
+            nvidia.com/gpu: {GPU}
+        env:
+        - name: WANDB_API_KEY
+          valueFrom:
+            secretKeyRef:
+              key: api-key
+              name: wandb
+      imagePullSecrets:  # Needed for private images
+      - name: docker
+      restartPolicy: Never

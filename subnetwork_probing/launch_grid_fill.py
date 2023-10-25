@@ -30,7 +30,7 @@ def main(TASKS: list[str], job: Optional[KubernetesJob], name: str, testing: boo
 
     wandb_identifier = WandbIdentifier(
         run_name=f"{name}-res{int(reset_networks)}-{{i:05d}}",
-        group_name="tracr-shuffled-redo",
+        group_name="cameraready-reset-zero-2",
         project="induction-sp-replicate")
 
 
@@ -70,10 +70,10 @@ def main(TASKS: list[str], job: Optional[KubernetesJob], name: str, testing: boo
                         seq_len = 41
                         if metric == "kl_div":
                             # Typical metric value range: 0.0-10.0
-                            regularization_params = expensive_base_regularization_params
+                            regularization_params = base_regularization_params
                         elif metric == "docstring_metric":
                             # Typical metric value range: -1.0 - 0.0
-                            regularization_params = 10 ** np.linspace(-4, 2, 21)
+                            regularization_params = 10 ** np.linspace(-4, 2, NUM_SPACINGS)
                         else:
                             raise ValueError("Unknown metric")
                         num_examples = 50
@@ -93,10 +93,10 @@ def main(TASKS: list[str], job: Optional[KubernetesJob], name: str, testing: boo
                         num_examples  = 50
                         if metric == "kl_div":
                             # Typical metric value range: 0.0-16.0
-                            regularization_params = expensive_base_regularization_params
+                            regularization_params = base_regularization_params
                         elif metric == "nll":
                             # Typical metric value range: 0.0-16.0
-                            regularization_params = expensive_base_regularization_params
+                            regularization_params = base_regularization_params
                         else:
                             raise ValueError("Unknown metric")
                     else:
@@ -151,7 +151,7 @@ if __name__ == "__main__":
                 [task],
                 KubernetesJob(
                     container="ghcr.io/arthurconmy/automatic-circuit-discovery:13057421",
-                    cpu=4,
+                    cpu=4 if task.startswith("tracr") else 2,
                     gpu=0 if task.startswith("tracr") else 1,
                     mount_training=False,
                 ),

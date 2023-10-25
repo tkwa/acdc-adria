@@ -16,7 +16,7 @@ CPU = 4
 
 def main(TASKS: list[str], group_name: str, run_name: str, testing: bool, use_kubernetes: bool, reset_networks: bool, abs_value_threshold: bool, use_gpu: bool=True):
     NUM_SPACINGS = 5 if reset_networks else 21
-    base_thresholds = 10 ** np.linspace(-4, 0, 21)
+    base_thresholds = 10 ** np.linspace(-4, 0, NUM_SPACINGS)
 
     seed = 486887094
     random.seed(seed)
@@ -49,7 +49,7 @@ def main(TASKS: list[str], group_name: str, run_name: str, testing: bool, use_ku
                         if metric == "kl_div":
                             # Typical metric value range: 0.0-20
                             # thresholds = 10 ** np.linspace(-4, 0, NUM_SPACINGS)
-                            thresholds = 10 ** np.linspace(-6, -4, 11)
+                            thresholds = 10 ** np.linspace(-6, -4, NUM_SPACINGS)
                         elif metric == "greaterthan":
                             # Typical metric value range: -1.0 - 0.0
                             thresholds = 10 ** np.linspace(-3, -1, NUM_SPACINGS)
@@ -64,7 +64,7 @@ def main(TASKS: list[str], group_name: str, run_name: str, testing: bool, use_ku
                             thresholds = base_thresholds
                         elif metric == "docstring_metric":
                             # Typical metric value range: -1.0 - 0.0
-                            thresholds = 10 ** np.linspace(-4, 0, 21)
+                            thresholds = 10 ** np.linspace(-4, 0, NUM_SPACINGS)
                         else:
                             raise ValueError("Unknown metric")
                         num_examples = 50
@@ -73,7 +73,7 @@ def main(TASKS: list[str], group_name: str, run_name: str, testing: bool, use_ku
                         seq_len = -1
                         if metric == "kl_div":
                             # Typical metric value range: 0.0-12.0
-                            thresholds = 10 ** np.linspace(-6, 0, 31)
+                            thresholds = 10 ** np.linspace(-6, 0, NUM_SPACINGS)
                         elif metric == "logit_diff":
                             # Typical metric value range: -0.31 -- -0.01
                             thresholds = 10 ** np.linspace(-4, 0, NUM_SPACINGS)
@@ -123,7 +123,7 @@ def main(TASKS: list[str], group_name: str, run_name: str, testing: bool, use_ku
         name="acdc-spreadsheet",
         job=None
         if not use_kubernetes
-        else KubernetesJob(container="ghcr.io/arthurconmy/automatic-circuit-discovery:13057421", cpu=CPU, gpu=int(use_gpu)),
+        else KubernetesJob(container="ghcr.io/arthurconmy/automatic-circuit-discovery:13057421", cpu=2 if use_gpu else 4, gpu=int(use_gpu)),
         check_wandb=wandb_identifier,
         just_print_commands=False,
     )
@@ -132,14 +132,24 @@ def main(TASKS: list[str], group_name: str, run_name: str, testing: bool, use_ku
 if __name__ == "__main__":
     for reset_networks in [True]:
         main(
-            TASKS=["ioi"],
-            group_name="cameraready-reset-zero",
+            TASKS=[k for k in METRICS_FOR_TASK if "tracr" not in k],
+            group_name="cameraready-reset-zero-2",
             run_name=f"acdc-{{i:05d}}",
             testing=False,
             use_kubernetes=True,
             reset_networks=reset_networks,
             abs_value_threshold=True,
             use_gpu=True,
+        )
+        main(
+            TASKS=["tracr-reverse", "tracr-proportion"],
+            group_name="cameraready-reset-zero-2",
+            run_name=f"acdc-tracr-{{i:05d}}",
+            testing=False,
+            use_kubernetes=True,
+            reset_networks=reset_networks,
+            abs_value_threshold=True,
+            use_gpu=False,
         )
 
 # if __name__ == "__main__":

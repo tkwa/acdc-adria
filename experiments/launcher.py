@@ -1,5 +1,6 @@
 from pathlib import Path
 import subprocess
+import json
 from typing import Optional, TextIO, List, Tuple
 import numpy as np
 import shlex
@@ -34,10 +35,13 @@ def launch(commands: List[List[str]], name: str, job: Optional[KubernetesJob] = 
 
     assert len(commands) <= 100_000, "Too many commands for 5 digits"
 
-    print(f"Launching {len(commands)} jobs")
+    with open("job-template.yaml") as f:
+        template: str = f.read()
+
+    #print(f"Launching {len(commands)} jobs")
     for i, command in enumerate(commands):
         if i not in ids_for_worker:
-            print(f"Skipping {name} because it's not my turn, {i} not in {ids_for_worker}")
+            #print(f"Skipping {name} because it's not my turn, {i} not in {ids_for_worker}")
             continue
 
         command_str = shlex.join(command)
@@ -59,7 +63,7 @@ def launch(commands: List[List[str]], name: str, job: Optional[KubernetesJob] = 
             #     print(f"Run {name} already exists, skipping")
             #     continue
 
-        print("Launching", name, command_str)
+        #print("Launching", name, command_str)
         if just_print_commands:
             continue
 
@@ -80,26 +84,8 @@ def launch(commands: List[List[str]], name: str, job: Optional[KubernetesJob] = 
             else:
                 assert job.gpu == 0
 
-            subprocess.run(
-                [
-                    "ctl",
-                    "job",
-                    "run",
-                    f"--name={name}",
-                    "--shared-host-dir-slow-tolerant",
-                    f"--container={job.container}",
-                    f"--cpu={job.cpu}",
-                    f"--gpu={job.gpu}",
-                    "--login",
-                    "--wandb",
-                    f"--command={command_str}",
-                    "--working-dir=/Automatic-Circuit-Discovery",
-                    "--shared-host-dir=/home/agarriga/.cache",
-                    "--shared-host-dir-mount=/root/.cache",
-                    *job.mount_training_options(),
-                ],
-                check=True,
-            )
+            print("---")
+            print(template.format(CPU=job.cpu, GPU=job.gpu, NAME=name, COMMAND=json.dumps(command), IMAGE=job.container))
         i += 1
 
     for (command, process, out, err) in to_wait:
