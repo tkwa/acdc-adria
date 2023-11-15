@@ -17,3 +17,10 @@ all_task_things = get_all_docstring_things(
 )
 masked_model = MaskedTransformer(all_task_things.tl_model)
 # %%
+masked_model.do_zero_caching()
+rng_state = torch.random.get_rng_state()
+masked_model.do_random_resample_caching(all_task_things.validation_patch_data)
+context_args = dict(ablation='resample', ablation_data=all_task_things.validation_patch_data)
+with masked_model.with_fwd_hooks_and_new_cache(**context_args) as hooked_model:
+    out1 = hooked_model(all_task_things.validation_data)
+# %%

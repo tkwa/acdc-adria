@@ -105,6 +105,9 @@ class MaskedTransformer(torch.nn.Module):
         self.mask_logits = torch.nn.ParameterList()
         self.mask_logits_names = []
         self._mask_logits_dict = {}
+
+        self.forward_cache_names = []
+
         self.ablation_cache = ActivationCache({}, self.model)
         self.forward_cache = ActivationCache({}, self.model)
         # Hyperparameters
@@ -117,6 +120,8 @@ class MaskedTransformer(torch.nn.Module):
         p = (self.mask_init_p - self.gamma) / (self.zeta - self.gamma)
         mask_init_constant = math.log(p / (1 - p))
 
+        # Add mask logits for ablation cache
+        # TODO edit these logits to have one for every pair of nodes-- maybe use TLACDCCorrespondence
         for layer_index, layer in enumerate(model.blocks):
             # MLP: turn on/off
             mask_name = f"blocks.{layer_index}.hook_mlp_out"
@@ -132,6 +137,12 @@ class MaskedTransformer(torch.nn.Module):
                 ))
                 self.mask_logits_names.append(mask_name)
                 self._mask_logits_dict[mask_name] = self.mask_logits[-1]
+
+        # Add hook points for forward cache
+        for layer_index, layer in enumerate(model.blocks):
+            self.forward_cache_names.append(f"blocks.{layer_index}.hook_mlp_out")
+            self.forward_cache_names.append(f"blocks.{layer_index}.attn.hook_result")
+
 
     def sample_mask(self, mask_name):
         """Samples a binary-ish mask from the mask_scores for the particular `mask_name` activation"""
@@ -175,9 +186,15 @@ class MaskedTransformer(torch.nn.Module):
         mask = self.sample_mask(hook.name)
         out = mask * hook_point_out + (1 - mask) * self.ablation_cache[hook.name]
         return out
+    
+    def caching_hook(self, hook_point_out: torch.Tensor, hook: HookPoint):
+        self.forward_cache.cache_dict[hook.name] = hook_point_out
+        return hook_point_out
 
     def fwd_hooks(self) -> List[Tuple[str, Callable]]:
-        return [(n, self.activation_mask_hook) for n in self.mask_logits_names]
+        return [(n, self.activation_mask_hook) for n in self.mask_logits_names] + \
+            [(n, self.caching_hook) for n in self.forward_cache_names]
+
 
     def with_fwd_hooks_and_new_cache(self, ablation='resample', ablation_data=None) -> ContextManager[HookedTransformer]:
         assert ablation in ['zero', 'resample']
