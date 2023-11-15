@@ -102,3 +102,10 @@ def test_cache_writeable_forward_pass():
 
     # We don't use allclose; the values should be exactly the same
     assert (out1 == out2).all()
+
+def test_f_cache_implementation():
+    """
+    Verifies that the network running on forward cache with nothing resampled is
+    identical to the unhooked network
+    """
+    raise NotImplementedError
