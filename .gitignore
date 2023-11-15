@@ -60,3 +60,4 @@ pts/
 **/.DS_Store
 
 ob-jupyter
+*.bundle

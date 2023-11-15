@@ -92,7 +92,8 @@ def log_plotly_bar_chart(x: List[str], y: List[float]) -> None:
 
 class MaskedTransformer(torch.nn.Module):
     model: HookedTransformer
-    cache: ActivationCache
+    ablation_cache: ActivationCache
+    forward_cache: ActivationCache
     mask_logits: torch.nn.ParameterList
     mask_logits_names: List[str]
     _mask_logits_dict: Dict[str, torch.nn.Parameter]
@@ -104,7 +105,8 @@ class MaskedTransformer(torch.nn.Module):
         self.mask_logits = torch.nn.ParameterList()
         self.mask_logits_names = []
         self._mask_logits_dict = {}
-        self.cache = ActivationCache({}, self.model)
+        self.ablation_cache = ActivationCache({}, self.model)
+        self.forward_cache = ActivationCache({}, self.model)
         # Hyperparameters
         self.beta = beta
         self.gamma = gamma
@@ -154,7 +156,7 @@ class MaskedTransformer(torch.nn.Module):
     def do_random_resample_caching(self, patch_data) -> torch.Tensor:
         # Only cache the tensors needed to fill the masked out positions
         with torch.no_grad():
-            model_out, self.cache = self.model.run_with_cache(
+            model_out, self.ablation_cache = self.model.run_with_cache(
                 patch_data, names_filter=self.mask_logits_names_filter, return_cache_object=True
             )
         return model_out
@@ -165,13 +167,13 @@ class MaskedTransformer(torch.nn.Module):
         Note: the shape of this is the mask shape, instead of the activation shape like for
         `do_random_resample_caching`; this is ultimately fine due to broadcasting.
         """
-        self.cache = ActivationCache(
+        self.ablation_cache = ActivationCache(
             {name: torch.zeros_like(scores) for name, scores in self._mask_logits_dict.items()}, self.model
         )
 
     def activation_mask_hook(self, hook_point_out: torch.Tensor, hook: HookPoint):
         mask = self.sample_mask(hook.name)
-        out = mask * hook_point_out + (1 - mask) * self.cache[hook.name]
+        out = mask * hook_point_out + (1 - mask) * self.ablation_cache[hook.name]
         return out
 
     def fwd_hooks(self) -> List[Tuple[str, Callable]]:
@@ -268,7 +270,6 @@ def train_sp(
     args,
     masked_model: MaskedTransformer,
     all_task_things: AllDataThings,
-    to_log_dict: dict,
     print_every:int=2,
 ):
     epochs = args.epochs
@@ -378,13 +379,13 @@ def train_sp(
 
         print(f"Final test metric: {test_specific_metrics}")
 
-        to_log_dict.update(
+        log_dict = dict(
             number_of_nodes=number_of_nodes,
             specific_metric=specific_metric_term,
             nodes_to_mask=nodes_to_mask,
             **test_specific_metrics,
         )
-    return masked_model
+    return masked_model, log_dict
 
 
 def proportion_of_binary_scores(model: MaskedTransformer) -> float:
@@ -480,21 +481,19 @@ if __name__ == "__main__":
 
     masked_model.freeze_weights()
     print("Finding subnetwork...")
-    to_log_dict = dict()
-    masked_model = train_sp(
+    masked_model, log_dict = train_sp(
         args=args,
         masked_model=masked_model,
         all_task_things=all_task_things,
-        to_log_dict=to_log_dict,
     )
 
     percentage_binary = proportion_of_binary_scores(masked_model)
 
     # Update dict with some different things
-    to_log_dict["nodes_to_mask"] = list(map(str, to_log_dict["nodes_to_mask"]))
+    log_dict["nodes_to_mask"] = list(map(str, log_dict["nodes_to_mask"]))
     # to_log_dict["number_of_edges"] = corr.count_no_edges() TODO
-    to_log_dict["percentage_binary"] = percentage_binary
+    log_dict["percentage_binary"] = percentage_binary
 
-    wandb.log(to_log_dict)
+    wandb.log(log_dict)
 
     wandb.finish()
