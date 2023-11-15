@@ -43,6 +43,9 @@ def test_induction_mask_reimplementation_correct():
         "gated_mlp",
         "use_attn_in",
         "use_hook_mlp_in",
+        "default_prepend_bos",
+        "dtype",
+        "add_special_tokens",
     ]:
         if kwarg_string in kwargs:
             del kwargs[kwarg_string]
