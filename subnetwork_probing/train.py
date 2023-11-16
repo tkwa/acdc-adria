@@ -162,6 +162,7 @@ class MaskedTransformer(torch.nn.Module):
                 )
 
         # Add hook points for forward cache
+        self.forward_cache_names.extend(["hook_embed","hook_pos_embed"])
         for layer_index, layer in enumerate(model.blocks):
             # print(f"adding forward cache for layer {layer_index}")
             if not model.cfg.attn_only:
@@ -230,7 +231,7 @@ class MaskedTransformer(torch.nn.Module):
         """
         # print(f"Doing ablation of {hook.name}")
         mask = self.sample_mask(hook.name) # in_edges, nodes_per_mask, ...
-        if self.no_ablate: mask = torch.zeros_like(mask) # for testing only
+        if self.no_ablate: mask = torch.ones_like(mask) # for testing only
 
         # Get values from ablation cache and forward cache
         names = self.cache_keys_dict[hook.name]
@@ -238,14 +239,22 @@ class MaskedTransformer(torch.nn.Module):
         f_values = self.get_mask_values(names, self.forward_cache) # in_edges, ...
         # print(f"{a_values.shape=}, {f_values.shape=}, {mask.shape=}, target shape={hook_point_out.shape}")
 
+        # Add embedding and biases
+        out = (self.forward_cache['hook_embed'] + self.forward_cache['hook_pos_embed']).unsqueeze(2) # b s 1 d
         # Resum the residual stream
         weighted_a_values = torch.einsum("b s i d, i o -> b s o d", a_values, 1 - mask)
         weighted_f_values = torch.einsum("b s i d, i o -> b s o d", f_values, mask)
-        out = weighted_a_values + weighted_f_values
+        out += weighted_a_values + weighted_f_values
         if 'mlp' in hook.name:
             out = rearrange(out, 'b s 1 d -> b s d')
+
+        block_num = int(hook.name.split('.')[1])
+        for layer in self.model.blocks[:block_num if 'mlp' in hook.name else 1]:
+            out += layer.attn.b_O
+
         if not torch.allclose(hook_point_out, out):
             print(f"Warning: hook_point_out and out are not close for {hook.name}")
+            print(f"{hook_point_out.mean()=}, {out.mean()=}")
         return out
     
     def caching_hook(self, hook_point_out: torch.Tensor, hook: HookPoint):

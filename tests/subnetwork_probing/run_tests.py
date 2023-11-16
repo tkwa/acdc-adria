@@ -52,7 +52,7 @@ def test_f_cache_implementation():
     with masked_model.with_fwd_hooks_and_new_cache(**context_args) as hooked_model:
         out2 = hooked_model(all_task_things.validation_data)
 
-    print(out1, out2)
     assert torch.allclose(out1, out2)
+    print(f"Outputs of shape {out1.shape} are close:")
 test_f_cache_implementation()
 # %%
