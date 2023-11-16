@@ -8,6 +8,7 @@ from typing import Callable, ContextManager, Dict, List, Optional, Tuple
 import torch
 import wandb
 from tqdm import tqdm
+from einops import rearrange, reduce, repeat
 from transformer_lens import HookedTransformer
 from transformer_lens.ActivationCache import ActivationCache
 from transformer_lens.hook_points import HookPoint
@@ -91,21 +92,31 @@ def log_plotly_bar_chart(x: List[str], y: List[float]) -> None:
 
 
 class MaskedTransformer(torch.nn.Module):
+    """
+    Edge-level SP is currently being implemented; ask tkwa for details
+    """
     model: HookedTransformer
     ablation_cache: ActivationCache
     forward_cache: ActivationCache
     mask_logits: torch.nn.ParameterList
+    # what is the purpose of this? why can't you just use dict.keys()? -tkwa
     mask_logits_names: List[str]
     _mask_logits_dict: Dict[str, torch.nn.Parameter]
 
-    def __init__(self, model, beta=2 / 3, gamma=-0.1, zeta=1.1, mask_init_p=0.9):
+    def __init__(self, model:HookedTransformer, beta=2 / 3, gamma=-0.1, zeta=1.1, mask_init_p=0.9, no_ablate=False):
         super().__init__()
 
         self.model = model
+        self.n_heads = model.cfg.n_heads
+        self.n_mlp = 0 if model.cfg.attn_only else 1
         self.mask_logits = torch.nn.ParameterList()
         self.mask_logits_names = []
         self._mask_logits_dict = {}
+        self.no_ablate = no_ablate
 
+        # Stores the cache keys that correspond to each mask,
+        # e.g. ...1.hook_mlp_in -> ["blocks.0.attn.hook_result", "blocks.0.hook_mlp_out", "blocks.1.attn.hook_result"]
+        self.cache_keys_dict:dict[str, list[str]] = {}
         self.forward_cache_names = []
 
         self.ablation_cache = ActivationCache({}, self.model)
@@ -120,31 +131,46 @@ class MaskedTransformer(torch.nn.Module):
         p = (self.mask_init_p - self.gamma) / (self.zeta - self.gamma)
         mask_init_constant = math.log(p / (1 - p))
 
-        # Add mask logits for ablation cache
-        # TODO edit these logits to have one for every pair of nodes-- maybe use TLACDCCorrespondence
-        for layer_index, layer in enumerate(model.blocks):
-            # MLP: turn on/off
-            mask_name = f"blocks.{layer_index}.hook_mlp_out"
-            self.mask_logits.append(torch.nn.Parameter(torch.zeros((1,)) + mask_init_constant))
-            self.mask_logits_names.append(mask_name)
-            self._mask_logits_dict[mask_name] = self.mask_logits[-1]
+        model.cfg.use_hook_mlp_in = True # We need to hook the MLP input to do subnetwork probing
 
-            # QKV: turn each head on/off
-            for q_k_v in ["q", "k", "v"]:
-                mask_name = f"blocks.{layer_index}.attn.hook_{q_k_v}"
-                self.mask_logits.append(torch.nn.Parameter(
-                    torch.zeros((model.cfg.n_heads, 1)) + mask_init_constant
-                ))
+        # Add mask logits for ablation cache
+        # Mask logits have a variable dimension depending on the number of in-edges (increases with layer)
+        for layer_index, layer in enumerate(model.blocks):
+            # QKV: in-edges from all previous layers
+            if layer_index > 0:
+                for q_k_v in ["q", "k", "v"]:
+                    mask_name = f"blocks.{layer_index}.hook_{q_k_v}_input"
+                    self.mask_logits.append(torch.nn.Parameter(
+                        torch.zeros(((self.n_heads + self.n_mlp) * layer_index, self.n_heads)) + mask_init_constant
+                    ))
+                    self.mask_logits_names.append(mask_name)
+                    self._mask_logits_dict[mask_name] = self.mask_logits[-1]
+                    self.cache_keys_dict[mask_name] = (
+                        [f"blocks.{l}.attn.hook_result" for l in range(layer_index)],
+                        [] if model.cfg.attn_only else [f"blocks.{l}.hook_mlp_out" for l in range(layer_index)]
+                    )
+
+            # MLP: in-edges from all previous layers and current layer's attention heads
+            if not model.cfg.attn_only:
+                mask_name = f"blocks.{layer_index}.hook_mlp_in"
+                self.mask_logits.append(torch.nn.Parameter(torch.zeros((self.n_heads + (self.n_heads + self.n_mlp) * layer_index, 1)) + mask_init_constant))
                 self.mask_logits_names.append(mask_name)
                 self._mask_logits_dict[mask_name] = self.mask_logits[-1]
+                self.cache_keys_dict[mask_name] = (
+                    [f"blocks.{l}.attn.hook_result" for l in range(layer_index + 1)],
+                    [f"blocks.{l}.hook_mlp_out" for l in range(layer_index)]
+                )
 
         # Add hook points for forward cache
         for layer_index, layer in enumerate(model.blocks):
-            self.forward_cache_names.append(f"blocks.{layer_index}.hook_mlp_out")
+            # print(f"adding forward cache for layer {layer_index}")
+            if not model.cfg.attn_only:
+                self.forward_cache_names.append(f"blocks.{layer_index}.hook_mlp_out")
             self.forward_cache_names.append(f"blocks.{layer_index}.attn.hook_result")
+        assert all([name in self.forward_cache_names for ckl in self.cache_keys_dict.values() for attn_or_mlp in ckl for name in attn_or_mlp])
 
 
-    def sample_mask(self, mask_name):
+    def sample_mask(self, mask_name) -> torch.Tensor:
         """Samples a binary-ish mask from the mask_scores for the particular `mask_name` activation"""
         mask_scores = self._mask_logits_dict[mask_name]
         uniform_sample = torch.zeros_like(mask_scores).uniform_().clamp_(0.0001, 0.9999)
@@ -168,7 +194,7 @@ class MaskedTransformer(torch.nn.Module):
         # Only cache the tensors needed to fill the masked out positions
         with torch.no_grad():
             model_out, self.ablation_cache = self.model.run_with_cache(
-                patch_data, names_filter=self.mask_logits_names_filter, return_cache_object=True
+                patch_data, names_filter=lambda name: name in self.forward_cache_names, return_cache_object=True
             )
         return model_out
 
@@ -182,9 +208,44 @@ class MaskedTransformer(torch.nn.Module):
             {name: torch.zeros_like(scores) for name, scores in self._mask_logits_dict.items()}, self.model
         )
 
+    def get_mask_values(self, names, cache:ActivationCache):
+        """
+        Returns a tuple a_values, f_values, from activation and forward caches respectively
+        Attention is shape batch, seq, heads, head_size while MLP out is batch, seq, d_model?
+        so we need to reshape things to match
+        """
+        attn_names, mlp_names = names
+        result = []
+        for name in attn_names:
+            value = cache[name] # b s n_heads d
+            result.append(value)
+        for name in mlp_names: # TODO test
+            value = repeat(cache[name], 'b s d -> b s 1 d')
+            result.append(value)
+        return torch.cat(result, dim=2)
+
     def activation_mask_hook(self, hook_point_out: torch.Tensor, hook: HookPoint):
-        mask = self.sample_mask(hook.name)
-        out = mask * hook_point_out + (1 - mask) * self.ablation_cache[hook.name]
+        """
+        For edge-level SP, we discard the hook_point_out value and resum the residual stream.
+        """
+        # print(f"Doing ablation of {hook.name}")
+        mask = self.sample_mask(hook.name) # in_edges, nodes_per_mask, ...
+        if self.no_ablate: mask = torch.zeros_like(mask) # for testing only
+
+        # Get values from ablation cache and forward cache
+        names = self.cache_keys_dict[hook.name]
+        a_values = self.get_mask_values(names, self.ablation_cache) # in_edges, ...
+        f_values = self.get_mask_values(names, self.forward_cache) # in_edges, ...
+        # print(f"{a_values.shape=}, {f_values.shape=}, {mask.shape=}, target shape={hook_point_out.shape}")
+
+        # Resum the residual stream
+        weighted_a_values = torch.einsum("b s i d, i o -> b s o d", a_values, 1 - mask)
+        weighted_f_values = torch.einsum("b s i d, i o -> b s o d", f_values, mask)
+        out = weighted_a_values + weighted_f_values
+        if 'mlp' in hook.name:
+            out = rearrange(out, 'b s 1 d -> b s d')
+        if not torch.allclose(hook_point_out, out):
+            print(f"Warning: hook_point_out and out are not close for {hook.name}")
         return out
     
     def caching_hook(self, hook_point_out: torch.Tensor, hook: HookPoint):
