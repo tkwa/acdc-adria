@@ -1,3 +1,5 @@
+# %%
+
 import argparse
 import collections
 import gc
@@ -93,7 +95,13 @@ def log_plotly_bar_chart(x: List[str], y: List[float]) -> None:
 
 class MaskedTransformer(torch.nn.Module):
     """
-    Edge-level SP is currently being implemented; ask tkwa for details
+    A wrapper around HookedTransformer that allows edge-level subnetwork probing.
+
+    There are two sets of hooks:
+    - `activation_mask_hook`s change the input to a node. The input to a node is the sum
+      of several residual stream terms; ablated edges are looked up from `ablation_cache`
+      and non-ablated edges from `forward_cache`, then the sum is taken.
+    - `caching_hook`s save the output of a node to `forward_cache` for use in later layers.
     """
     model: HookedTransformer
     ablation_cache: ActivationCache
@@ -188,8 +196,8 @@ class MaskedTransformer(torch.nn.Module):
         ]
         return torch.mean(torch.stack(per_parameter_loss))
 
-    def mask_logits_names_filter(self, name):
-        return name in self.mask_logits_names
+    # def mask_logits_names_filter(self, name):
+    #     return name in self.mask_logits_names
 
     def do_random_resample_caching(self, patch_data) -> torch.Tensor:
         # Only cache the tensors needed to fill the masked out positions
@@ -201,18 +209,16 @@ class MaskedTransformer(torch.nn.Module):
 
     def do_zero_caching(self):
         """Caches zero for every possible mask point.
-
-        Note: the shape of this is the mask shape, instead of the activation shape like for
-        `do_random_resample_caching`; this is ultimately fine due to broadcasting.
         """
-        self.ablation_cache = ActivationCache(
-            {name: torch.zeros_like(scores) for name, scores in self._mask_logits_dict.items()}, self.model
-        )
+        patch_data = torch.zeros((1, 1), device=args.device, dtype=torch.int64) # batch pos
+        self.do_random_resample_caching(patch_data)
+        self.ablation_cache.cache_dict = \
+            {name: torch.zeros_like(scores) for name, scores in self.ablation_cache.cache_dict.items()}
 
     def get_mask_values(self, names, cache:ActivationCache):
         """
-        Returns a tuple a_values, f_values, from activation and forward caches respectively
-        Attention is shape batch, seq, heads, head_size while MLP out is batch, seq, d_model?
+        Returns a single tensor of the mask values used for a given hook.
+        Attention is shape batch, seq, heads, head_size while MLP out is batch, seq, d_model
         so we need to reshape things to match
         """
         attn_names, mlp_names = names
@@ -220,7 +226,7 @@ class MaskedTransformer(torch.nn.Module):
         for name in attn_names:
             value = cache[name] # b s n_heads d
             result.append(value)
-        for name in mlp_names: # TODO test
+        for name in mlp_names:
             value = repeat(cache[name], 'b s d -> b s 1 d')
             result.append(value)
         return torch.cat(result, dim=2)
@@ -252,9 +258,9 @@ class MaskedTransformer(torch.nn.Module):
         for layer in self.model.blocks[:block_num if 'mlp' in hook.name else 1]:
             out += layer.attn.b_O
 
-        if not torch.allclose(hook_point_out, out):
-            print(f"Warning: hook_point_out and out are not close for {hook.name}")
-            print(f"{hook_point_out.mean()=}, {out.mean()=}")
+        # if not torch.allclose(hook_point_out, out):
+        #     print(f"Warning: hook_point_out and out are not close for {hook.name}")
+        #     print(f"{hook_point_out.mean()=}, {out.mean()=}")
         return out
     
     def caching_hook(self, hook_point_out: torch.Tensor, hook: HookPoint):
@@ -279,6 +285,8 @@ class MaskedTransformer(torch.nn.Module):
         for p in self.model.parameters():
             p.requires_grad = False
 
+
+# %%
 
 def visualize_mask(masked_model: MaskedTransformer) -> tuple[int, list[TLACDCInterpNode]]:
     number_of_heads = masked_model.model.cfg.n_heads
@@ -403,7 +411,7 @@ def train_sp(
 
     # Get canonical subgraph so we can print TPR, FPR
     canonical_circuit_subgraph = TLACDCCorrespondence.setup_from_model(masked_model.model, use_pos_embed=False)
-    d_trues = set(get_true_edges())
+    # d_trues = set(get_true_edges())
 
     for epoch in tqdm(range(epochs)):  # tqdm.notebook.tqdm(range(epochs)):
         masked_model.train()
@@ -418,9 +426,10 @@ def train_sp(
         trainer.step()
 
         if epoch % print_every == 0 and args.print_stats:
-            number_of_nodes, nodes_to_mask = visualize_mask(masked_model)
-            corr, _ = iterative_correspondence_from_mask(masked_model.model, nodes_to_mask)
-            print_stats(corr, d_trues, canonical_circuit_subgraph)
+            pass
+            # number_of_nodes, nodes_to_mask = visualize_mask(masked_model)
+            # corr, _ = iterative_correspondence_from_mask(masked_model.model, nodes_to_mask)
+            # print_stats(corr, d_trues, canonical_circuit_subgraph)
             
 
     wandb.log(
@@ -467,9 +476,9 @@ def train_sp(
         print(f"Final test metric: {test_specific_metrics}")
 
         log_dict = dict(
-            number_of_nodes=number_of_nodes,
+            # number_of_nodes=number_of_nodes,
             specific_metric=specific_metric_term,
-            nodes_to_mask=nodes_to_mask,
+            # nodes_to_mask=nodes_to_mask,
             **test_specific_metrics,
         )
     return masked_model, log_dict
@@ -492,7 +501,7 @@ def proportion_of_binary_scores(model: MaskedTransformer) -> float:
 
 
 parser = argparse.ArgumentParser("train_induction")
-parser.add_argument("--wandb-name", type=str, required=True)
+parser.add_argument("--wandb-name", type=str, required=False)
 parser.add_argument("--wandb-project", type=str, default="subnetwork-probing")
 parser.add_argument("--wandb-entity", type=str, required=True)
 parser.add_argument("--wandb-group", type=str, required=True)
@@ -514,6 +523,7 @@ parser.add_argument("--task", type=str, required=True)
 parser.add_argument("--torch-num-threads", type=int, default=0, help="How many threads to use for torch (0=all)")
 parser.add_argument("--print-stats", type=int, default=1, required=False)
 
+# %%
 if __name__ == "__main__":
     args = parser.parse_args()
 
@@ -577,7 +587,7 @@ if __name__ == "__main__":
     percentage_binary = proportion_of_binary_scores(masked_model)
 
     # Update dict with some different things
-    log_dict["nodes_to_mask"] = list(map(str, log_dict["nodes_to_mask"]))
+    # log_dict["nodes_to_mask"] = list(map(str, log_dict["nodes_to_mask"]))
     # to_log_dict["number_of_edges"] = corr.count_no_edges() TODO
     log_dict["percentage_binary"] = percentage_binary
 
