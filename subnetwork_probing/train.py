@@ -17,9 +17,10 @@ from transformer_lens.hook_points import HookPoint
 
 from acdc.acdc_utils import filter_nodes, get_edge_stats, get_node_stats, get_present_nodes, reset_network
 from acdc.docstring.utils import AllDataThings, get_all_docstring_things, get_docstring_subgraph_true_edges
-from acdc.greaterthan.utils import get_all_greaterthan_things
-from acdc.induction.utils import get_all_induction_things
-from acdc.ioi.utils import get_all_ioi_things
+from acdc.tracr_task.utils import get_tracr_proportion_edges, get_tracr_reverse_edges
+from acdc.greaterthan.utils import get_all_greaterthan_things, get_greaterthan_true_edges
+from acdc.induction.utils import get_all_induction_things #, get_induction_true_edges
+from acdc.ioi.utils import get_all_ioi_things, get_ioi_true_edges
 from acdc.TLACDCCorrespondence import TLACDCCorrespondence
 from acdc.TLACDCEdge import Edge, EdgeType, TorchIndex
 from acdc.TLACDCInterpNode import TLACDCInterpNode
@@ -85,6 +86,28 @@ def iterative_correspondence_from_mask(
 
     return corr, head_parents
 
+def edge_level_corr_from_mask(masked_model: HookedTransformer, use_pos_embed:bool=False) -> TLACDCCorrespondence:
+    corr = TLACDCCorrespondence.setup_from_model(masked_model.model, use_pos_embed=use_pos_embed)
+    # Sample masks for all edges
+    values = dict()
+    for name in masked_model._mask_logits_dict.keys():
+        sampled_mask = masked_model.sample_mask(name)
+        values[name] = sampled_mask
+    # Define edges
+    for child, sampled_mask in values.items():
+        child_name = child.split('.')[2]
+        child_index = int(child.split('.')[1])
+        attn_parents, mlp_parents = masked_model.cache_keys_dict[child]
+        parents = attn_parents + mlp_parents
+        for parent in parents:
+            parent_name = parent.split('.')[2]
+            parent_index = int(parent.split('.')[1])
+            print(f"setting node {child_name} {child_index}, {parent_name} {parent_index}")
+            corr.edges[child_name][child_index][parent_name][parent_index].present = (sampled_mask[parent_index] >= 0.5)
+    
+    return corr
+
+
 
 def log_plotly_bar_chart(x: List[str], y: List[float]) -> None:
     import plotly.graph_objects as go
@@ -121,10 +144,12 @@ class MaskedTransformer(torch.nn.Module):
         self.mask_logits_names = []
         self._mask_logits_dict = {}
         self.no_ablate = no_ablate
+        self.device = self.model.parameters().__next__().device
 
         # Stores the cache keys that correspond to each mask,
         # e.g. ...1.hook_mlp_in -> ["blocks.0.attn.hook_result", "blocks.0.hook_mlp_out", "blocks.1.attn.hook_result"]
-        self.cache_keys_dict:dict[str, list[str]] = {}
+        # Logits are attention in-edges, then MLP in-edges
+        self.cache_keys_dict:Dict[str, Tuple[list[str], list[str]]] = {}
         self.forward_cache_names = []
 
         self.ablation_cache = ActivationCache({}, self.model)
@@ -149,7 +174,7 @@ class MaskedTransformer(torch.nn.Module):
                 for q_k_v in ["q", "k", "v"]:
                     mask_name = f"blocks.{layer_index}.hook_{q_k_v}_input"
                     self.mask_logits.append(torch.nn.Parameter(
-                        torch.zeros(((self.n_heads + self.n_mlp) * layer_index, self.n_heads)) + mask_init_constant
+                        torch.zeros(((self.n_heads + self.n_mlp) * layer_index, self.n_heads), device=self.device) + mask_init_constant
                     ))
                     self.mask_logits_names.append(mask_name)
                     self._mask_logits_dict[mask_name] = self.mask_logits[-1]
@@ -161,7 +186,7 @@ class MaskedTransformer(torch.nn.Module):
             # MLP: in-edges from all previous layers and current layer's attention heads
             if not model.cfg.attn_only:
                 mask_name = f"blocks.{layer_index}.hook_mlp_in"
-                self.mask_logits.append(torch.nn.Parameter(torch.zeros((self.n_heads + (self.n_heads + self.n_mlp) * layer_index, 1)) + mask_init_constant))
+                self.mask_logits.append(torch.nn.Parameter(torch.zeros((self.n_heads + (self.n_heads + self.n_mlp) * layer_index, 1), device=self.device) + mask_init_constant))
                 self.mask_logits_names.append(mask_name)
                 self._mask_logits_dict[mask_name] = self.mask_logits[-1]
                 self.cache_keys_dict[mask_name] = (
@@ -210,7 +235,7 @@ class MaskedTransformer(torch.nn.Module):
     def do_zero_caching(self):
         """Caches zero for every possible mask point.
         """
-        patch_data = torch.zeros((1, 1), device=args.device, dtype=torch.int64) # batch pos
+        patch_data = torch.zeros((1, 1), device=self.device, dtype=torch.int64) # batch pos
         self.do_random_resample_caching(patch_data)
         self.ablation_cache.cache_dict = \
             {name: torch.zeros_like(scores) for name, scores in self.ablation_cache.cache_dict.items()}
@@ -285,10 +310,19 @@ class MaskedTransformer(torch.nn.Module):
         for p in self.model.parameters():
             p.requires_grad = False
 
+    def num_edges(self):
+        values = []
+        for name, mask in self._mask_logits_dict.items():
+            mask_value = self.sample_mask(name)
+            values.extend(mask_value.flatten().tolist())
+        values = torch.tensor(values)
+        return (values > 0.5).sum().item()
+
 
 # %%
 
 def visualize_mask(masked_model: MaskedTransformer) -> tuple[int, list[TLACDCInterpNode]]:
+    # This is bad code, shouldn't combine visualizing and getting the nodes to mask
     number_of_heads = masked_model.model.cfg.n_heads
     number_of_layers = masked_model.model.cfg.n_layers
     node_name_list = []
@@ -366,6 +400,7 @@ def train_sp(
     masked_model: MaskedTransformer,
     all_task_things: AllDataThings,
     print_every:int=2,
+    get_true_edges: Callable = None,
 ):
     epochs = args.epochs
     lambda_reg = args.lambda_reg
@@ -411,7 +446,7 @@ def train_sp(
 
     # Get canonical subgraph so we can print TPR, FPR
     canonical_circuit_subgraph = TLACDCCorrespondence.setup_from_model(masked_model.model, use_pos_embed=False)
-    # d_trues = set(get_true_edges())
+    d_trues = set(get_true_edges())
 
     for epoch in tqdm(range(epochs)):  # tqdm.notebook.tqdm(range(epochs)):
         masked_model.train()
@@ -426,10 +461,16 @@ def train_sp(
         trainer.step()
 
         if epoch % print_every == 0 and args.print_stats:
-            pass
+            wandb.log({
+                "epoch": epoch,
+                "num_edges": masked_model.num_edges(),
+            })
+            # TODO edit this to create a corr from masked edges
             # number_of_nodes, nodes_to_mask = visualize_mask(masked_model)
             # corr, _ = iterative_correspondence_from_mask(masked_model.model, nodes_to_mask)
             # print_stats(corr, d_trues, canonical_circuit_subgraph)
+            corr = edge_level_corr_from_mask(masked_model)
+            print_stats(corr, d_trues, canonical_circuit_subgraph)
             
 
     wandb.log(
@@ -537,6 +578,7 @@ if __name__ == "__main__":
             device=torch.device(args.device),
             metric_name=args.loss_type,
         )
+        get_true_edges = get_ioi_true_edges
     elif args.task == "induction":
         all_task_things = get_all_induction_things(
             args.num_examples,
@@ -544,10 +586,12 @@ if __name__ == "__main__":
             device=torch.device(args.device),
             metric=args.loss_type,
         )
+        get_true_edges = get_induction_true_edges # missing??? -tkwa
     elif args.task == "tracr-reverse":
         all_task_things = get_all_tracr_things(
             task="reverse", metric_name=args.loss_type, num_examples=args.num_examples, device=torch.device(args.device)
         )
+        get_true_edges = get_tracr_reverse_edges
     elif args.task == "tracr-proportion":
         all_task_things = get_all_tracr_things(
             task="proportion",
@@ -555,6 +599,7 @@ if __name__ == "__main__":
             num_examples=args.num_examples,
             device=torch.device(args.device),
         )
+        get_true_edges = get_tracr_proportion_edges
     elif args.task == "docstring":
         all_task_things = get_all_docstring_things(
             num_examples=args.num_examples,
@@ -570,6 +615,7 @@ if __name__ == "__main__":
             metric_name=args.loss_type,
             device=args.device,
         )
+        get_true_edges = get_greaterthan_true_edges
     else:
         raise ValueError(f"Unknown task {args.task}")
 
@@ -582,6 +628,7 @@ if __name__ == "__main__":
         args=args,
         masked_model=masked_model,
         all_task_things=all_task_things,
+        get_true_edges=get_true_edges,
     )
 
     percentage_binary = proportion_of_binary_scores(masked_model)
