@@ -86,24 +86,25 @@ def iterative_correspondence_from_mask(
 
     return corr, head_parents
 
-def edge_level_corr_from_mask(masked_model: HookedTransformer, use_pos_embed:bool=False) -> TLACDCCorrespondence:
+def edge_level_corr(masked_model: HookedTransformer, use_pos_embed:bool=False) -> TLACDCCorrespondence:
     corr = TLACDCCorrespondence.setup_from_model(masked_model.model, use_pos_embed=use_pos_embed)
     # Sample masks for all edges
-    values = dict()
+    masks = dict()
     for name in masked_model._mask_logits_dict.keys():
         sampled_mask = masked_model.sample_mask(name)
-        values[name] = sampled_mask
+        masks[name] = sampled_mask
     # Define edges
-    for child, sampled_mask in values.items():
-        child_name = child.split('.')[2]
-        child_index = int(child.split('.')[1])
+    print("defining edges")
+    for child, sampled_mask in masks.items():
+        # not sure if this is the right way to do indexing
+        child_index = TorchIndex((None,) if 'mlp' in child or 'resid' in child else (None, None, 0))
         attn_parents, mlp_parents = masked_model.cache_keys_dict[child]
         parents = attn_parents + mlp_parents
-        for parent in parents:
-            parent_name = parent.split('.')[2]
-            parent_index = int(parent.split('.')[1])
-            print(f"setting node {child_name} {child_index}, {parent_name} {parent_index}")
-            corr.edges[child_name][child_index][parent_name][parent_index].present = (sampled_mask[parent_index] >= 0.5)
+        for i, parent in enumerate(parents):
+            parent_index = TorchIndex((None,) if 'mlp' in parent or 'resid' in parent else (None, None, 0))
+
+            edge = corr.edges[child][child_index][parent][parent_index]
+            edge.present = (sampled_mask[i] >= 0.5)
     
     return corr
 
@@ -399,7 +400,7 @@ def train_sp(
     args,
     masked_model: MaskedTransformer,
     all_task_things: AllDataThings,
-    print_every:int=2,
+    print_every:int=50,
     get_true_edges: Callable = None,
 ):
     epochs = args.epochs
@@ -469,7 +470,7 @@ def train_sp(
             # number_of_nodes, nodes_to_mask = visualize_mask(masked_model)
             # corr, _ = iterative_correspondence_from_mask(masked_model.model, nodes_to_mask)
             # print_stats(corr, d_trues, canonical_circuit_subgraph)
-            corr = edge_level_corr_from_mask(masked_model)
+            corr = edge_level_corr(masked_model)
             print_stats(corr, d_trues, canonical_circuit_subgraph)
             
 
