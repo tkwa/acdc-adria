@@ -86,27 +86,6 @@ def iterative_correspondence_from_mask(
 
     return corr, head_parents
 
-def edge_level_corr(masked_model: HookedTransformer, use_pos_embed:bool=False) -> TLACDCCorrespondence:
-    corr = TLACDCCorrespondence.setup_from_model(masked_model.model, use_pos_embed=use_pos_embed)
-    # Sample masks for all edges
-    masks = dict()
-    for name in masked_model._mask_logits_dict.keys():
-        sampled_mask = masked_model.sample_mask(name)
-        masks[name] = sampled_mask
-    # Define edges
-    for child, sampled_mask in masks.items():
-        # not sure if this is the right way to do indexing
-        child_index = TorchIndex((None,) if 'mlp' in child or 'resid' in child else (None, None, 0))
-        attn_parents, mlp_parents = masked_model.parent_node_names[child]
-        parents = attn_parents + mlp_parents
-        for i, parent in enumerate(parents):
-            parent_index = TorchIndex((None,) if 'mlp' in parent or 'resid' in parent else (None, None, 0))
-
-            edge = corr.edges[child][child_index][parent][parent_index]
-            edge.present = (sampled_mask[i] >= 0.5).item()
-    
-
-    return corr
 
 
 
@@ -334,6 +313,36 @@ class MaskedTransformer(torch.nn.Module):
         values = torch.tensor(values)
         return (values > 0.5).sum().item()
 
+
+def edge_level_corr(masked_model: MaskedTransformer, use_pos_embed:bool=False) -> TLACDCCorrespondence:
+    corr = TLACDCCorrespondence.setup_from_model(masked_model.model, use_pos_embed=use_pos_embed)
+    # Sample masks for all edges
+    masks = dict()
+    for name in masked_model._mask_logits_dict.keys():
+        sampled_mask = masked_model.sample_mask(name)
+        masks[name] = sampled_mask
+    # Define edges
+    for child, sampled_mask in masks.items():
+        # not sure if this is the right way to do indexing
+        child_index = TorchIndex((None,) if 'mlp' in child or 'resid' in child else (None, None, 0))
+        attn_parents, mlp_parents = masked_model.parent_node_names[child]
+        parents = attn_parents + mlp_parents
+        for i, parent in enumerate(parents):
+            parent_index = TorchIndex((None,) if 'mlp' in parent or 'resid' in parent else (None, None, 0))
+
+            edge = corr.edges[child][child_index][parent][parent_index]
+            edge.present = (sampled_mask[i] >= 0.5).item()
+    
+    # Delete a node's incoming edges if it has no outgoing edges
+    def get_nodes_with_out_edges(corr):
+        nodes_with_out_edges = set()
+        for (receiver_name, receiver_index, sender_name, sender_index), edge in corr.all_edges().items():
+            nodes_with_out_edges.add(sender_name)
+        return nodes_with_out_edges
+    for (receiver_name, receiver_index, sender_name, sender_index), edge in corr.all_edges().items():
+        if receiver_name not in get_nodes_with_out_edges(corr):
+            edge.present = False
+    return corr
 
 # %%
 
