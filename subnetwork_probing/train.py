@@ -194,7 +194,7 @@ class MaskedTransformer(torch.nn.Module):
         """
         self.parent_node_names[mask_name] = parent_nodes
         self.mask_logits.append(torch.nn.Parameter(
-            torch.full((len(parent_nodes[0]) + len(parent_nodes[1]), out_dim), self.mask_init_constant, device=self.device)
+            torch.full((len(parent_nodes[0])*self.n_heads + len(parent_nodes[1]), out_dim), self.mask_init_constant, device=self.device)
         ))
         self.mask_logits_names.append(mask_name)
         self._mask_logits_dict[mask_name] = self.mask_logits[-1]
@@ -255,6 +255,7 @@ class MaskedTransformer(torch.nn.Module):
         """
         For edge-level SP, we discard the hook_point_out value and resum the residual stream.
         """
+        is_attn = 'mlp' not in hook.name and 'resid_post' not in hook.name
         # print(f"Doing ablation of {hook.name}")
         mask = self.sample_mask(hook.name) # in_edges, nodes_per_mask, ...
         if self.no_ablate: mask = torch.ones_like(mask) # for testing only
@@ -267,11 +268,12 @@ class MaskedTransformer(torch.nn.Module):
 
         # Add embedding and biases
         out = (self.forward_cache['blocks.0.hook_resid_pre']).unsqueeze(2) # b s 1 d
+        if is_attn: out = out.repeat(1, 1, self.n_heads, 1) # b s n_heads d
         # Resum the residual stream
         weighted_a_values = torch.einsum("b s i d, i o -> b s o d", a_values, 1 - mask)
         weighted_f_values = torch.einsum("b s i d, i o -> b s o d", f_values, mask)
         out += weighted_a_values + weighted_f_values
-        if 'mlp' in hook.name or 'resid_post' in hook.name:
+        if not is_attn:
             out = rearrange(out, 'b s 1 d -> b s d')
 
         block_num = int(hook.name.split('.')[1])
@@ -281,6 +283,7 @@ class MaskedTransformer(torch.nn.Module):
         # if not torch.allclose(hook_point_out, out):
         #     print(f"Warning: hook_point_out and out are not close for {hook.name}")
         #     print(f"{hook_point_out.mean()=}, {out.mean()=}")
+        # print(f"{out.shape=}")
         return out
     
     def caching_hook(self, hook_point_out: torch.Tensor, hook: HookPoint):
