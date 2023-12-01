@@ -94,18 +94,18 @@ def edge_level_corr(masked_model: HookedTransformer, use_pos_embed:bool=False) -
         sampled_mask = masked_model.sample_mask(name)
         masks[name] = sampled_mask
     # Define edges
-    print("defining edges")
     for child, sampled_mask in masks.items():
         # not sure if this is the right way to do indexing
         child_index = TorchIndex((None,) if 'mlp' in child or 'resid' in child else (None, None, 0))
-        attn_parents, mlp_parents = masked_model.cache_keys_dict[child]
+        attn_parents, mlp_parents = masked_model.parent_node_names[child]
         parents = attn_parents + mlp_parents
         for i, parent in enumerate(parents):
             parent_index = TorchIndex((None,) if 'mlp' in parent or 'resid' in parent else (None, None, 0))
 
             edge = corr.edges[child][child_index][parent][parent_index]
-            edge.present = (sampled_mask[i] >= 0.5)
+            edge.present = (sampled_mask[i] >= 0.5).item()
     
+
     return corr
 
 
@@ -150,7 +150,8 @@ class MaskedTransformer(torch.nn.Module):
         # Stores the cache keys that correspond to each mask,
         # e.g. ...1.hook_mlp_in -> ["blocks.0.attn.hook_result", "blocks.0.hook_mlp_out", "blocks.1.attn.hook_result"]
         # Logits are attention in-edges, then MLP in-edges
-        self.cache_keys_dict:Dict[str, Tuple[list[str], list[str]]] = {}
+        # TODO this is ugly, maybe change to single list and use names to reshape correctly?
+        self.parent_node_names:Dict[str, Tuple[list[str], list[str]]] = {}
         self.forward_cache_names = []
 
         self.ablation_cache = ActivationCache({}, self.model)
@@ -163,47 +164,61 @@ class MaskedTransformer(torch.nn.Module):
 
         # Copied from subnetwork probing code. Similar to log odds (but not the same)
         p = (self.mask_init_p - self.gamma) / (self.zeta - self.gamma)
-        mask_init_constant = math.log(p / (1 - p))
+        self.mask_init_constant = math.log(p / (1 - p))
 
         model.cfg.use_hook_mlp_in = True # We need to hook the MLP input to do subnetwork probing
 
         # Add mask logits for ablation cache
         # Mask logits have a variable dimension depending on the number of in-edges (increases with layer)
-        for layer_index, layer in enumerate(model.blocks):
+        for layer_i in range(model.cfg.n_layers):
             # QKV: in-edges from all previous layers
-            if layer_index > 0:
+            if layer_i > 0:
                 for q_k_v in ["q", "k", "v"]:
-                    mask_name = f"blocks.{layer_index}.hook_{q_k_v}_input"
-                    self.mask_logits.append(torch.nn.Parameter(
-                        torch.zeros(((self.n_heads + self.n_mlp) * layer_index, self.n_heads), device=self.device) + mask_init_constant
-                    ))
-                    self.mask_logits_names.append(mask_name)
-                    self._mask_logits_dict[mask_name] = self.mask_logits[-1]
-                    self.cache_keys_dict[mask_name] = (
-                        [f"blocks.{l}.attn.hook_result" for l in range(layer_index)],
-                        [] if model.cfg.attn_only else [f"blocks.{l}.hook_mlp_out" for l in range(layer_index)]
-                    )
+
+                    self._setup_mask_logits(
+                        mask_name=f"blocks.{layer_i}.hook_{q_k_v}_input",
+                        parent_nodes=([f"blocks.{l}.attn.hook_result" for l in range(layer_i)],
+                                           [f"blocks.{l}.hook_mlp_out" for l in range(layer_i)] if not model.cfg.attn_only else []),
+                        out_dim=self.n_heads)
 
             # MLP: in-edges from all previous layers and current layer's attention heads
             if not model.cfg.attn_only:
-                mask_name = f"blocks.{layer_index}.hook_mlp_in"
-                self.mask_logits.append(torch.nn.Parameter(torch.zeros((self.n_heads + (self.n_heads + self.n_mlp) * layer_index, 1), device=self.device) + mask_init_constant))
-                self.mask_logits_names.append(mask_name)
-                self._mask_logits_dict[mask_name] = self.mask_logits[-1]
-                self.cache_keys_dict[mask_name] = (
-                    [f"blocks.{l}.attn.hook_result" for l in range(layer_index + 1)],
-                    [f"blocks.{l}.hook_mlp_out" for l in range(layer_index)]
+                parent_nodes = (
+                    [f"blocks.{l}.attn.hook_result" for l in range(layer_i + 1)],
+                    [f"blocks.{l}.hook_mlp_out" for l in range(layer_i)]
                 )
+                self._setup_mask_logits(
+                    mask_name = f"blocks.{layer_i}.hook_mlp_in",
+                    parent_nodes=parent_nodes,
+                    out_dim=1)
+            
+        self._setup_mask_logits(
+            mask_name = f"blocks.{model.cfg.n_layers - 1}.hook_resid_post",
+            parent_nodes=([f"blocks.{l}.attn.hook_result" for l in range(model.cfg.n_layers)],
+                               [f"blocks.{l}.hook_mlp_out" for l in range(model.cfg.n_layers)] if not model.cfg.attn_only else []),
+            out_dim=1
+        )
 
         # Add hook points for forward cache
-        self.forward_cache_names.extend(["hook_embed","hook_pos_embed"])
-        for layer_index, layer in enumerate(model.blocks):
+        self.forward_cache_names.append("blocks.0.hook_resid_pre") # not counted as a node in gt, but in resid stream
+        for layer_i in range(model.cfg.n_layers):
             # print(f"adding forward cache for layer {layer_index}")
             if not model.cfg.attn_only:
-                self.forward_cache_names.append(f"blocks.{layer_index}.hook_mlp_out")
-            self.forward_cache_names.append(f"blocks.{layer_index}.attn.hook_result")
-        assert all([name in self.forward_cache_names for ckl in self.cache_keys_dict.values() for attn_or_mlp in ckl for name in attn_or_mlp])
+                self.forward_cache_names.append(f"blocks.{layer_i}.hook_mlp_out")
+            self.forward_cache_names.append(f"blocks.{layer_i}.attn.hook_result")
+        assert all([name in self.forward_cache_names for ckl in self.parent_node_names.values() for attn_or_mlp in ckl for name in attn_or_mlp])
 
+    def _setup_mask_logits(self, mask_name, parent_nodes, out_dim):
+        """
+        Adds a mask logit for the given mask name and parent nodes
+        Parent nodes are (attention, MLP)
+        """
+        self.parent_node_names[mask_name] = parent_nodes
+        self.mask_logits.append(torch.nn.Parameter(
+            torch.full((len(parent_nodes[0]) + len(parent_nodes[1]), out_dim), self.mask_init_constant, device=self.device)
+        ))
+        self.mask_logits_names.append(mask_name)
+        self._mask_logits_dict[mask_name] = self.mask_logits[-1]
 
     def sample_mask(self, mask_name) -> torch.Tensor:
         """Samples a binary-ish mask from the mask_scores for the particular `mask_name` activation"""
@@ -266,18 +281,18 @@ class MaskedTransformer(torch.nn.Module):
         if self.no_ablate: mask = torch.ones_like(mask) # for testing only
 
         # Get values from ablation cache and forward cache
-        names = self.cache_keys_dict[hook.name]
+        names = self.parent_node_names[hook.name]
         a_values = self.get_mask_values(names, self.ablation_cache) # in_edges, ...
         f_values = self.get_mask_values(names, self.forward_cache) # in_edges, ...
         # print(f"{a_values.shape=}, {f_values.shape=}, {mask.shape=}, target shape={hook_point_out.shape}")
 
         # Add embedding and biases
-        out = (self.forward_cache['hook_embed'] + self.forward_cache['hook_pos_embed']).unsqueeze(2) # b s 1 d
+        out = (self.forward_cache['blocks.0.hook_resid_pre']).unsqueeze(2) # b s 1 d
         # Resum the residual stream
         weighted_a_values = torch.einsum("b s i d, i o -> b s o d", a_values, 1 - mask)
         weighted_f_values = torch.einsum("b s i d, i o -> b s o d", f_values, mask)
         out += weighted_a_values + weighted_f_values
-        if 'mlp' in hook.name:
+        if 'mlp' in hook.name or 'resid_post' in hook.name:
             out = rearrange(out, 'b s 1 d -> b s d')
 
         block_num = int(hook.name.split('.')[1])
@@ -371,20 +386,27 @@ def visualize_mask(masked_model: MaskedTransformer) -> tuple[int, list[TLACDCInt
     node_count = total_nodes - len(nodes_to_mask)
     return node_count, nodes_to_mask
 
-
-def print_stats(corr, d_trues, canonical_circuit_subgraph, wandb_log=True):
+def set_ground_truth_edges(canonical_circuit_subgraph: TLACDCCorrespondence, ground_truth_set: set):
     for (receiver_name, receiver_index, sender_name, sender_index), edge in canonical_circuit_subgraph.all_edges().items():
         key =(receiver_name, receiver_index.hashable_tuple, sender_name, sender_index.hashable_tuple)
-        edge.present = (key in d_trues)
-    stats = get_node_stats(ground_truth=canonical_circuit_subgraph, recovered=corr)
+        edge.present = (key in ground_truth_set)
+
+
+def print_stats(recovered_corr, ground_truth_subgraph, do_print=True, wandb_log=True):
+    """
+    False postitive = present in recovered_corr but not in ground_truth_set
+    """
+
+    stats = get_node_stats(ground_truth=ground_truth_subgraph, recovered=recovered_corr)
+    print(stats)
     node_tpr = stats["true positive"] / (stats["true positive"] + stats["false negative"])
     node_fpr = stats["false positive"] / (stats["false positive"] + stats["true negative"])
-    print(f"Node TPR: {node_tpr:.3f}. Node FPR: {node_fpr:.3f}")
+    if do_print:print(f"Node TPR: {node_tpr:.3f}. Node FPR: {node_fpr:.3f}")
 
-    stats = get_edge_stats(ground_truth=canonical_circuit_subgraph, recovered=corr)
+    stats = get_edge_stats(ground_truth=ground_truth_subgraph, recovered=recovered_corr)
     edge_tpr = stats["true positive"] / (stats["true positive"] + stats["false negative"])
     edge_fpr = stats["false positive"] / (stats["false positive"] + stats["true negative"])
-    print(f"Edge TPR: {edge_tpr:.3f}. Edge FPR: {edge_fpr:.3f}")
+    if do_print:print(f"Edge TPR: {edge_tpr:.3f}. Edge FPR: {edge_fpr:.3f}")
 
     if wandb_log:
         wandb.log(
@@ -448,6 +470,7 @@ def train_sp(
     # Get canonical subgraph so we can print TPR, FPR
     canonical_circuit_subgraph = TLACDCCorrespondence.setup_from_model(masked_model.model, use_pos_embed=False)
     d_trues = set(get_true_edges())
+    set_ground_truth_edges(canonical_circuit_subgraph, d_trues)
 
     for epoch in tqdm(range(epochs)):  # tqdm.notebook.tqdm(range(epochs)):
         masked_model.train()
@@ -471,7 +494,7 @@ def train_sp(
             # corr, _ = iterative_correspondence_from_mask(masked_model.model, nodes_to_mask)
             # print_stats(corr, d_trues, canonical_circuit_subgraph)
             corr = edge_level_corr(masked_model)
-            print_stats(corr, d_trues, canonical_circuit_subgraph)
+            print_stats(corr, canonical_circuit_subgraph)
             
 
     wandb.log(
