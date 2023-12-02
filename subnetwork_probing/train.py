@@ -114,7 +114,7 @@ class MaskedTransformer(torch.nn.Module):
     mask_logits_names: List[str]
     _mask_logits_dict: Dict[str, torch.nn.Parameter]
 
-    def __init__(self, model:HookedTransformer, beta=2 / 3, gamma=-0.1, zeta=1.1, mask_init_p=0.9, no_ablate=False):
+    def __init__(self, model:HookedTransformer, beta=2 / 3, gamma=-0.1, zeta=1.1, mask_init_p=0.9, use_pos_embed=False, no_ablate=False):
         super().__init__()
 
         self.model = model
@@ -125,6 +125,7 @@ class MaskedTransformer(torch.nn.Module):
         self._mask_logits_dict = {}
         self.no_ablate = no_ablate
         self.device = self.model.parameters().__next__().device
+        self.use_pos_embed = use_pos_embed
 
         # Stores the cache keys that correspond to each mask,
         # e.g. ...1.hook_mlp_in -> ["blocks.0.attn.hook_result", "blocks.0.hook_mlp_out", "blocks.1.attn.hook_result"]
@@ -147,24 +148,25 @@ class MaskedTransformer(torch.nn.Module):
 
         model.cfg.use_hook_mlp_in = True # We need to hook the MLP input to do subnetwork probing
 
+        self.embeds = ["hook_embed", "hook_pos_embed"] if self.use_pos_embed else \
+                      ["blocks.0.hook_resid_pre"]
         # Add mask logits for ablation cache
         # Mask logits have a variable dimension depending on the number of in-edges (increases with layer)
         for layer_i in range(model.cfg.n_layers):
             # QKV: in-edges from all previous layers
-            if layer_i > 0:
-                for q_k_v in ["q", "k", "v"]:
+            for q_k_v in ["q", "k", "v"]:
 
-                    self._setup_mask_logits(
-                        mask_name=f"blocks.{layer_i}.hook_{q_k_v}_input",
-                        parent_nodes=([f"blocks.{l}.attn.hook_result" for l in range(layer_i)],
-                                           [f"blocks.{l}.hook_mlp_out" for l in range(layer_i)] if not model.cfg.attn_only else []),
-                        out_dim=self.n_heads)
+                self._setup_mask_logits(
+                    mask_name=f"blocks.{layer_i}.hook_{q_k_v}_input",
+                    parent_nodes=([f"blocks.{l}.attn.hook_result" for l in range(layer_i)],
+                                    ([f"blocks.{l}.hook_mlp_out" for l in range(layer_i)] if not model.cfg.attn_only else []) + self.embeds),
+                    out_dim=self.n_heads)
 
             # MLP: in-edges from all previous layers and current layer's attention heads
             if not model.cfg.attn_only:
                 parent_nodes = (
                     [f"blocks.{l}.attn.hook_result" for l in range(layer_i + 1)],
-                    [f"blocks.{l}.hook_mlp_out" for l in range(layer_i)]
+                    [f"blocks.{l}.hook_mlp_out" for l in range(layer_i)] + self.embeds,
                 )
                 self._setup_mask_logits(
                     mask_name = f"blocks.{layer_i}.hook_mlp_in",
@@ -174,12 +176,13 @@ class MaskedTransformer(torch.nn.Module):
         self._setup_mask_logits(
             mask_name = f"blocks.{model.cfg.n_layers - 1}.hook_resid_post",
             parent_nodes=([f"blocks.{l}.attn.hook_result" for l in range(model.cfg.n_layers)],
-                               [f"blocks.{l}.hook_mlp_out" for l in range(model.cfg.n_layers)] if not model.cfg.attn_only else []),
+                          ([f"blocks.{l}.hook_mlp_out" for l in range(model.cfg.n_layers)] if not model.cfg.attn_only else []) + self.embeds),
             out_dim=1
         )
 
         # Add hook points for forward cache
-        self.forward_cache_names.append("blocks.0.hook_resid_pre") # not counted as a node in gt, but in resid stream
+        self.forward_cache_names.extend(
+            self.embeds) # not counted as a node in gt, but in resid stream
         for layer_i in range(model.cfg.n_layers):
             # print(f"adding forward cache for layer {layer_index}")
             if not model.cfg.attn_only:
@@ -267,12 +270,12 @@ class MaskedTransformer(torch.nn.Module):
         # print(f"{a_values.shape=}, {f_values.shape=}, {mask.shape=}, target shape={hook_point_out.shape}")
 
         # Add embedding and biases
-        out = (self.forward_cache['blocks.0.hook_resid_pre']).unsqueeze(2) # b s 1 d
-        if is_attn: out = out.repeat(1, 1, self.n_heads, 1) # b s n_heads d
+        
+        # if is_attn: out = out.repeat(1, 1, self.n_heads, 1) # b s n_heads d
         # Resum the residual stream
         weighted_a_values = torch.einsum("b s i d, i o -> b s o d", a_values, 1 - mask)
         weighted_f_values = torch.einsum("b s i d, i o -> b s o d", f_values, mask)
-        out += weighted_a_values + weighted_f_values
+        out = weighted_a_values + weighted_f_values
         if not is_attn:
             out = rearrange(out, 'b s 1 d -> b s d')
 
@@ -315,9 +318,14 @@ class MaskedTransformer(torch.nn.Module):
             values.extend(mask_value.flatten().tolist())
         values = torch.tensor(values)
         return (values > 0.5).sum().item()
+    
+    def num_params(self):
+        return sum(p.numel() for p in self.mask_logits)
 
 
-def edge_level_corr(masked_model: MaskedTransformer, use_pos_embed:bool=False) -> TLACDCCorrespondence:
+def edge_level_corr(masked_model: MaskedTransformer, use_pos_embed:bool=None) -> TLACDCCorrespondence:
+    if use_pos_embed is None:
+        use_pos_embed = masked_model.use_pos_embed
     corr = TLACDCCorrespondence.setup_from_model(masked_model.model, use_pos_embed=use_pos_embed)
     # Sample masks for all edges
     masks = dict()
@@ -325,13 +333,16 @@ def edge_level_corr(masked_model: MaskedTransformer, use_pos_embed:bool=False) -
         sampled_mask = masked_model.sample_mask(name)
         masks[name] = sampled_mask
     # Define edges
+    def index(name):
+        return TorchIndex((None,) if 'mlp' in name or 'resid' in name or 'embed' in name or name == 'blocks.0.hook_resid_pre' \
+                          else (None, None, 0))
     for child, sampled_mask in masks.items():
         # not sure if this is the right way to do indexing
-        child_index = TorchIndex((None,) if 'mlp' in child or 'resid' in child else (None, None, 0))
+        child_index = index(child)
         attn_parents, mlp_parents = masked_model.parent_node_names[child]
         parents = attn_parents + mlp_parents
         for i, parent in enumerate(parents):
-            parent_index = TorchIndex((None,) if 'mlp' in parent or 'resid' in parent else (None, None, 0))
+            parent_index = index(parent)
 
             edge = corr.edges[child][child_index][parent][parent_index]
             edge.present = (sampled_mask[i] >= 0.5).item()
@@ -406,11 +417,12 @@ def set_ground_truth_edges(canonical_circuit_subgraph: TLACDCCorrespondence, gro
 
 def print_stats(recovered_corr, ground_truth_subgraph, do_print=True, wandb_log=True):
     """
-    False postitive = present in recovered_corr but not in ground_truth_set
+    False positive = present in recovered_corr but not in ground_truth_set
+    False negative = present in ground_truth_set but not in recovered_corr
     """
-
+    # diff = set(recovered_corr.all_edges().keys()) - set(ground_truth_subgraph.all_edges().keys())
+    # if diff: print(f"{len(diff)} key mismatches: {diff}")
     stats = get_node_stats(ground_truth=ground_truth_subgraph, recovered=recovered_corr)
-    print(stats)
     node_tpr = stats["true positive"] / (stats["true positive"] + stats["false negative"])
     node_fpr = stats["false positive"] / (stats["false positive"] + stats["true negative"])
     if do_print:print(f"Node TPR: {node_tpr:.3f}. Node FPR: {node_fpr:.3f}")
@@ -434,7 +446,7 @@ def train_sp(
     args,
     masked_model: MaskedTransformer,
     all_task_things: AllDataThings,
-    print_every:int=50,
+    print_every:int=100,
     get_true_edges: Callable = None,
 ):
     epochs = args.epochs
@@ -480,7 +492,7 @@ def train_sp(
         context_args = dict(ablation='resample', ablation_data=all_task_things.validation_patch_data)
 
     # Get canonical subgraph so we can print TPR, FPR
-    canonical_circuit_subgraph = TLACDCCorrespondence.setup_from_model(masked_model.model, use_pos_embed=False)
+    canonical_circuit_subgraph = TLACDCCorrespondence.setup_from_model(masked_model.model, use_pos_embed=masked_model.use_pos_embed)
     d_trues = set(get_true_edges())
     set_ground_truth_edges(canonical_circuit_subgraph, d_trues)
 
@@ -500,22 +512,17 @@ def train_sp(
             wandb.log({
                 "epoch": epoch,
                 "num_edges": masked_model.num_edges(),
+                "regularization_loss": regularizer_term.item(),
+                "specific_metric_loss": specific_metric_term.item(),
+                "total_loss": loss.item(),
             })
             # TODO edit this to create a corr from masked edges
             # number_of_nodes, nodes_to_mask = visualize_mask(masked_model)
             # corr, _ = iterative_correspondence_from_mask(masked_model.model, nodes_to_mask)
             # print_stats(corr, d_trues, canonical_circuit_subgraph)
             corr = edge_level_corr(masked_model)
-            print_stats(corr, canonical_circuit_subgraph)
-            
+            print_stats(corr, canonical_circuit_subgraph, do_print=False)
 
-    wandb.log(
-        {
-            "regularisation_loss": regularizer_term.item(),
-            "specific_metric_loss": specific_metric_term.item(),
-            "total_loss": loss.item(),
-        }
-    )
 
     with torch.no_grad():
         # The loss has a lot of variance so let's just average over a few runs with the same seed
