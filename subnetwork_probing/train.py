@@ -131,7 +131,7 @@ class MaskedTransformer(torch.nn.Module):
         # e.g. ...1.hook_mlp_in -> ["blocks.0.attn.hook_result", "blocks.0.hook_mlp_out", "blocks.1.attn.hook_result"]
         # Logits are attention in-edges, then MLP in-edges
         # TODO this is ugly, maybe change to single list and use names to reshape correctly?
-        self.parent_node_names:Dict[str, Tuple[list[str], list[str]]] = {}
+        self.parent_node_names:Dict[str, list[str]] = {}
         self.forward_cache_names = []
 
         self.ablation_cache = ActivationCache({}, self.model)
@@ -158,16 +158,15 @@ class MaskedTransformer(torch.nn.Module):
 
                 self._setup_mask_logits(
                     mask_name=f"blocks.{layer_i}.hook_{q_k_v}_input",
-                    parent_nodes=([f"blocks.{l}.attn.hook_result" for l in range(layer_i)],
+                    parent_nodes=([f"blocks.{l}.attn.hook_result" for l in range(layer_i)] + \
                                     ([f"blocks.{l}.hook_mlp_out" for l in range(layer_i)] if not model.cfg.attn_only else []) + self.embeds),
                     out_dim=self.n_heads)
 
             # MLP: in-edges from all previous layers and current layer's attention heads
             if not model.cfg.attn_only:
                 parent_nodes = (
-                    [f"blocks.{l}.attn.hook_result" for l in range(layer_i + 1)],
-                    [f"blocks.{l}.hook_mlp_out" for l in range(layer_i)] + self.embeds,
-                )
+                    [f"blocks.{l}.attn.hook_result" for l in range(layer_i + 1)] + \
+                    [f"blocks.{l}.hook_mlp_out" for l in range(layer_i)] + self.embeds)
                 self._setup_mask_logits(
                     mask_name = f"blocks.{layer_i}.hook_mlp_in",
                     parent_nodes=parent_nodes,
@@ -175,7 +174,7 @@ class MaskedTransformer(torch.nn.Module):
             
         self._setup_mask_logits(
             mask_name = f"blocks.{model.cfg.n_layers - 1}.hook_resid_post",
-            parent_nodes=([f"blocks.{l}.attn.hook_result" for l in range(model.cfg.n_layers)],
+            parent_nodes=([f"blocks.{l}.attn.hook_result" for l in range(model.cfg.n_layers)] + \
                           ([f"blocks.{l}.hook_mlp_out" for l in range(model.cfg.n_layers)] if not model.cfg.attn_only else []) + self.embeds),
             out_dim=1
         )
@@ -188,7 +187,9 @@ class MaskedTransformer(torch.nn.Module):
             if not model.cfg.attn_only:
                 self.forward_cache_names.append(f"blocks.{layer_i}.hook_mlp_out")
             self.forward_cache_names.append(f"blocks.{layer_i}.attn.hook_result")
-        assert all([name in self.forward_cache_names for ckl in self.parent_node_names.values() for attn_or_mlp in ckl for name in attn_or_mlp])
+        print(self.forward_cache_names, self.parent_node_names)
+        for ckl in self.parent_node_names.values():
+            for name in ckl: assert name in self.forward_cache_names, f"{name} not in forward cache names"
 
     def _setup_mask_logits(self, mask_name, parent_nodes, out_dim):
         """
@@ -197,7 +198,7 @@ class MaskedTransformer(torch.nn.Module):
         """
         self.parent_node_names[mask_name] = parent_nodes
         self.mask_logits.append(torch.nn.Parameter(
-            torch.full((len(parent_nodes[0])*self.n_heads + len(parent_nodes[1]), out_dim), self.mask_init_constant, device=self.device)
+            torch.full((sum((self.n_heads if 'attn' in n else 1 for n in parent_nodes)), out_dim), self.mask_init_constant, device=self.device)
         ))
         self.mask_logits_names.append(mask_name)
         self._mask_logits_dict[mask_name] = self.mask_logits[-1]
@@ -244,13 +245,10 @@ class MaskedTransformer(torch.nn.Module):
         Attention is shape batch, seq, heads, head_size while MLP out is batch, seq, d_model
         so we need to reshape things to match
         """
-        attn_names, mlp_names = names
         result = []
-        for name in attn_names:
-            value = cache[name] # b s n_heads d
-            result.append(value)
-        for name in mlp_names:
-            value = repeat(cache[name], 'b s d -> b s 1 d')
+        for name in names:
+            value = cache[name] # b s n_heads d, or b s d
+            if value.ndim == 3: value = value.unsqueeze(2) # b s 1 d
             result.append(value)
         return torch.cat(result, dim=2)
 
@@ -283,9 +281,9 @@ class MaskedTransformer(torch.nn.Module):
         for layer in self.model.blocks[:block_num if 'mlp' in hook.name else 1]:
             out += layer.attn.b_O
 
-        # if not torch.allclose(hook_point_out, out):
-        #     print(f"Warning: hook_point_out and out are not close for {hook.name}")
-        #     print(f"{hook_point_out.mean()=}, {out.mean()=}")
+        if self.no_ablate and not torch.allclose(hook_point_out, out):
+            print(f"Warning: hook_point_out and out are not close for {hook.name}")
+            print(f"{hook_point_out.mean()=}, {out.mean()=}")
         # print(f"{out.shape=}")
         return out
     
@@ -339,8 +337,7 @@ def edge_level_corr(masked_model: MaskedTransformer, use_pos_embed:bool=None) ->
     for child, sampled_mask in masks.items():
         # not sure if this is the right way to do indexing
         child_index = index(child)
-        attn_parents, mlp_parents = masked_model.parent_node_names[child]
-        parents = attn_parents + mlp_parents
+        parents = masked_model.parent_node_names[child]
         for i, parent in enumerate(parents):
             parent_index = index(parent)
 
