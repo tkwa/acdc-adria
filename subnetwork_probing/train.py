@@ -263,8 +263,10 @@ class MaskedTransformer(torch.nn.Module):
 
         # Get values from ablation cache and forward cache
         names = self.parent_node_names[hook.name]
-        a_values = self.get_mask_values(names, self.ablation_cache) # in_edges, ...
-        f_values = self.get_mask_values(names, self.forward_cache) # in_edges, ...
+        a_values = self.get_mask_values(names, self.ablation_cache) # b s i d
+        f_values = self.get_mask_values(names, self.forward_cache) # b s i d
+        sqdiff_values = (a_values - f_values).pow(2).mean()
+        # print(f"Upstream of {hook.name}, values differ by {sqdiff_values}")
         # print(f"{a_values.shape=}, {f_values.shape=}, {mask.shape=}, target shape={hook_point_out.shape}")
 
         # Add embedding and biases
@@ -284,11 +286,14 @@ class MaskedTransformer(torch.nn.Module):
         if self.no_ablate and not torch.allclose(hook_point_out, out):
             print(f"Warning: hook_point_out and out are not close for {hook.name}")
             print(f"{hook_point_out.mean()=}, {out.mean()=}")
-        # print(f"{out.shape=}")
+        
+        # no_change = torch.allclose(hook_point_out, out)
+        # sqdiff = (hook_point_out - out).pow(2).mean()
+        # print(f"Ablation hook {'did NOT' if no_change else 'DID'} change {hook.name} by {sqdiff:.3f} (caches differ by {sqdiff_values:.3f}, mask is {mask.mean():.3f})")
         return out
     
     def caching_hook(self, hook_point_out: torch.Tensor, hook: HookPoint):
-        self.forward_cache.cache_dict[hook.name] = hook_point_out
+        self.forward_cache.cache_dict[hook.name] = hook_point_out.clone()
         return hook_point_out
 
     def fwd_hooks(self) -> List[Tuple[str, Callable]]:
@@ -412,7 +417,7 @@ def set_ground_truth_edges(canonical_circuit_subgraph: TLACDCCorrespondence, gro
         edge.present = (key in ground_truth_set)
 
 
-def print_stats(recovered_corr, ground_truth_subgraph, do_print=True, wandb_log=True):
+def print_stats(recovered_corr, ground_truth_subgraph, do_print=True):
     """
     False positive = present in recovered_corr but not in ground_truth_set
     False negative = present in ground_truth_set but not in recovered_corr
@@ -429,15 +434,12 @@ def print_stats(recovered_corr, ground_truth_subgraph, do_print=True, wandb_log=
     edge_fpr = stats["false positive"] / (stats["false positive"] + stats["true negative"])
     if do_print:print(f"Edge TPR: {edge_tpr:.3f}. Edge FPR: {edge_fpr:.3f}")
 
-    if wandb_log:
-        wandb.log(
-            {
-                "node_tpr": node_tpr,
-                "node_fpr": node_fpr,
-                "edge_tpr": edge_tpr,
-                "edge_fpr": edge_fpr,
-            }
-        )
+    return {
+        "node_tpr": node_tpr,
+        "node_fpr": node_fpr,
+        "edge_tpr": edge_tpr,
+        "edge_fpr": edge_fpr,
+    }
 
 def train_sp(
     args,
@@ -461,7 +463,7 @@ def train_sp(
         mode=args.wandb_mode,
     )
     test_metric_fns = all_task_things.test_metrics
-
+    print(args)
     print("Reset subject:", args.reset_subject)
     if args.reset_subject:
         reset_network(args.task, args.device, masked_model.model)
@@ -484,9 +486,10 @@ def train_sp(
 
 
     if args.zero_ablation:
-        context_args = dict(ablation='zero')
+        valid_context_args, test_context_args = dict(ablation='zero')
     else:
-        context_args = dict(ablation='resample', ablation_data=all_task_things.validation_patch_data)
+        valid_context_args = dict(ablation='resample', ablation_data=all_task_things.validation_patch_data)
+        test_context_args = dict(ablation='resample', ablation_data=all_task_things.test_patch_data)
 
     # Get canonical subgraph so we can print TPR, FPR
     canonical_circuit_subgraph = TLACDCCorrespondence.setup_from_model(masked_model.model, use_pos_embed=masked_model.use_pos_embed)
@@ -497,28 +500,35 @@ def train_sp(
         masked_model.train()
         trainer.zero_grad()
 
-        with masked_model.with_fwd_hooks_and_new_cache(**context_args) as hooked_model:
-            specific_metric_term = all_task_things.validation_metric(hooked_model(all_task_things.validation_data))
+        with masked_model.with_fwd_hooks_and_new_cache(**valid_context_args) as hooked_model:
+            metric_loss = all_task_things.validation_metric(hooked_model(all_task_things.validation_data))
         regularizer_term = masked_model.regularization_loss()
-        loss = specific_metric_term + regularizer_term * lambda_reg
+        loss = metric_loss + regularizer_term * lambda_reg
         loss.backward()
 
         trainer.step()
 
         if epoch % print_every == 0 and args.print_stats:
+            corr = edge_level_corr(masked_model)
+            stats = print_stats(corr, canonical_circuit_subgraph, do_print=False)
+            with masked_model.with_fwd_hooks_and_new_cache(**test_context_args) as hooked_model:
+                test_metric_loss = all_task_things.validation_metric(hooked_model(all_task_things.test_data))
+            test_loss = test_metric_loss + regularizer_term * lambda_reg
+
             wandb.log({
                 "epoch": epoch,
                 "num_edges": masked_model.num_edges(),
                 "regularization_loss": regularizer_term.item(),
-                "specific_metric_loss": specific_metric_term.item(),
+                "validation_metric_loss": metric_loss.item(),
+                "test_metric_loss": test_metric_loss.item(),
                 "total_loss": loss.item(),
-            })
+                "test_total_loss": test_loss,
+            } | stats
+            )
             # TODO edit this to create a corr from masked edges
             # number_of_nodes, nodes_to_mask = visualize_mask(masked_model)
             # corr, _ = iterative_correspondence_from_mask(masked_model.model, nodes_to_mask)
             # print_stats(corr, d_trues, canonical_circuit_subgraph)
-            corr = edge_level_corr(masked_model)
-            print_stats(corr, canonical_circuit_subgraph, do_print=False)
 
 
     with torch.no_grad():
@@ -526,18 +536,18 @@ def train_sp(
         rng_state = torch.random.get_rng_state()
 
         # Final training loss
-        specific_metric_term = 0.0
+        metric_loss = 0.0
         if args.zero_ablation:
             masked_model.do_zero_caching()
         else:
             masked_model.do_random_resample_caching(all_task_things.validation_patch_data)
 
         for _ in range(args.n_loss_average_runs):
-            with masked_model.with_fwd_hooks_and_new_cache(**context_args) as hooked_model:
-                specific_metric_term += all_task_things.validation_metric(
+            with masked_model.with_fwd_hooks_and_new_cache(**valid_context_args) as hooked_model:
+                metric_loss += all_task_things.validation_metric(
                     hooked_model(all_task_things.validation_data)
                 ).item()
-        print(f"Final train/validation metric: {specific_metric_term:.4f}")
+        print(f"Final train/validation metric: {metric_loss:.4f}")
 
         if args.zero_ablation:
             masked_model.do_zero_caching()
@@ -550,7 +560,7 @@ def train_sp(
             test_specific_metric_term = 0.0
             # Test loss
             for _ in range(args.n_loss_average_runs):
-                with masked_model.with_fwd_hooks_and_new_cache(**context_args) as hooked_model:
+                with masked_model.with_fwd_hooks_and_new_cache(**valid_context_args) as hooked_model:
                     test_specific_metric_term += fn(hooked_model(all_task_things.test_data)).item()
             test_specific_metrics[f"test_{k}"] = test_specific_metric_term
 
@@ -558,7 +568,7 @@ def train_sp(
 
         log_dict = dict(
             # number_of_nodes=number_of_nodes,
-            specific_metric=specific_metric_term,
+            specific_metric=metric_loss,
             # nodes_to_mask=nodes_to_mask,
             **test_specific_metrics,
         )
