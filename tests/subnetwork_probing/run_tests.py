@@ -116,7 +116,7 @@ def test_empty_circuit():
     """
     With the empty circuit (everything is patched):
     - After running, the ablation and forward caches should match, except for hook_embed.
-    - The ablation cache should be the same as run_with_cache on the patched data
+    - TODO The ablation cache should be the same as run_with_cache on the patched data
     - The output should match the output on patched data.
     - Regularization loss should be low.
     - Loss should be high.
@@ -140,12 +140,8 @@ def test_empty_circuit():
     differing_cache_keys = set()
     for key in masked_model.ablation_cache.keys():
         abla, forw = masked_model.ablation_cache[key], masked_model.forward_cache[key]
-        sqdiff = (abla - forw).pow(2).mean()
-        abla_counter = Counter(abla.flatten().tolist())
-        forw_counter = Counter(forw.flatten().tolist())
         if torch.allclose(abla, forw):
             matching_cache_keys.add(key)
-            # print(f"Cache for {key} is the same, {abla.shape=}, {dict(abla_counter)}, {dict(forw_counter)}")
         else:
             differing_cache_keys.add(key)
 
@@ -165,8 +161,46 @@ def test_empty_circuit():
     total_loss = specific_metric_term + lambda_reg * reg_loss
     print(f"Metric loss of resample is {specific_metric_term:.6f}")
     print(f"Total loss of resample is {total_loss:.6f}")
-    assert specific_metric_term > 0.1, "Resample has too low loss"
+    assert specific_metric_term > 0.1, "Resample has too low metric loss"
 
 test_empty_circuit()
 
+# %%
+
+def test_ablate_output_circuit():
+    """
+    With the circuit that contains all edges EXCEPT edges to last layer resid_post:
+    - After running, the forward cache should match run_with_cache on validation data.
+    - The output should match output on patched data.
+    - Metric loss should be high.
+    """
+    all_task_things = get_all_tracr_things(
+        task="reverse", metric_name="l2", num_examples=6, device=torch.device("cpu")
+    )
+    masked_model = MaskedTransformer(all_task_things.tl_model, use_pos_embed=True)
+    masked_model.freeze_weights()
+
+    output_logit_name = f"blocks.{masked_model.model.cfg.n_layers - 1}.resid_post"
+    for logit_name in masked_model._mask_logits_dict:
+        masked_model._mask_logits_dict[logit_name].data.fill_(-10 if logit_name == output_logit_name else 10)
+
+    context_args = dict(ablation='resample', ablation_data=all_tracr_things.validation_patch_data)
+
+    out0, cache = masked_model.model.run_with_cache(all_tracr_things.validation_data)
+    out1 = masked_model.model(all_tracr_things.validation_patch_data)
+    with masked_model.with_fwd_hooks_and_new_cache(**context_args) as hooked_model:
+        out2 = hooked_model(all_tracr_things.validation_data)
+
+    assert masked_model.forward_cache.keys() < cache.keys()
+    for key in masked_model.forward_cache.keys():
+        assert torch.allclose(masked_model.forward_cache[key], cache[key]), f"forward_cache[{key}] is not close to cache[{key}]"
+
+    diff = (out1 - out2).abs().sum()
+    n_different_elements = (out1 != out2).sum()
+    assert torch.allclose(out1, out2), \
+        f"Outputs of masked model and unmasked model on patch data are not close: total diff={diff:.6f} on {n_different_elements} elements"
+        
+    specific_metric_term = all_task_things.validation_metric(out2)
+    assert specific_metric_term > 0.1, "Resample has too low metric loss"
+test_resid_post_circuit()
 # %%
