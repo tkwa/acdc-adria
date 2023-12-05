@@ -124,6 +124,8 @@ class MaskedTransformer(torch.nn.Module):
         self.mask_logits_names = []
         self._mask_logits_dict = {}
         self.no_ablate = no_ablate
+        if no_ablate:
+            print("WARNING: no_ablate is True, this is for testing only")
         self.device = self.model.parameters().__next__().device
         self.use_pos_embed = use_pos_embed
 
@@ -348,6 +350,7 @@ def edge_level_corr(masked_model: MaskedTransformer, use_pos_embed:bool=None) ->
 
             edge = corr.edges[child][child_index][parent][parent_index]
             edge.present = (sampled_mask[i] >= 0.5).item()
+            edge.effect_size = sampled_mask[i].item()
     
     # Delete a node's incoming edges if it has no outgoing edges
     def get_nodes_with_out_edges(corr):
@@ -599,7 +602,7 @@ parser.add_argument("--wandb-group", type=str, required=True)
 parser.add_argument("--wandb-dir", type=str, default="/tmp/wandb")
 parser.add_argument("--wandb-mode", type=str, default="online")
 parser.add_argument("--device", type=str, default="cuda")
-parser.add_argument("--lr", type=float, default=0.001)
+parser.add_argument("--lr", type=float, default=0.01)
 parser.add_argument("--loss-type", type=str, required=True)
 parser.add_argument("--epochs", type=int, default=3000)
 parser.add_argument("--verbose", type=int, default=1)
