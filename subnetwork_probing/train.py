@@ -114,7 +114,7 @@ class MaskedTransformer(torch.nn.Module):
     mask_logits_names: List[str]
     _mask_logits_dict: Dict[str, torch.nn.Parameter]
 
-    def __init__(self, model:HookedTransformer, beta=2 / 3, gamma=-0.1, zeta=1.1, mask_init_p=0.9, use_pos_embed=False, no_ablate=False):
+    def __init__(self, model:HookedTransformer, beta=2 / 3, gamma=-0.1, zeta=1.1, mask_init_p=0.9, use_pos_embed=False, no_ablate=False, verbose=False):
         super().__init__()
 
         self.model = model
@@ -128,6 +128,7 @@ class MaskedTransformer(torch.nn.Module):
             print("WARNING: no_ablate is True, this is for testing only")
         self.device = self.model.parameters().__next__().device
         self.use_pos_embed = use_pos_embed
+        self.verbose = verbose
 
         # Stores the cache keys that correspond to each mask,
         # e.g. ...1.hook_mlp_in -> ["blocks.0.attn.hook_result", "blocks.0.hook_mlp_out", "blocks.1.attn.hook_result"]
@@ -289,9 +290,10 @@ class MaskedTransformer(torch.nn.Module):
             print(f"Warning: hook_point_out and out are not close for {hook.name}")
             print(f"{hook_point_out.mean()=}, {out.mean()=}")
         
-        # no_change = torch.allclose(hook_point_out, out)
-        # sqdiff = (hook_point_out - out).pow(2).mean()
-        # print(f"Ablation hook {'did NOT' if no_change else 'DID'} change {hook.name} by {sqdiff:.3f} (caches differ by {sqdiff_values:.3f}, mask is {mask.mean():.3f})")
+        if self.verbose:
+            no_change = torch.allclose(hook_point_out, out)
+            absdiff = (hook_point_out - out).abs().mean()
+            print(f"Ablation hook {'did NOT' if no_change else 'DID'} change {hook.name} by {absdiff:.3f} (caches differ by {sqdiff_values:.3f}, {mask.mean()=:.3f})")
         return out
     
     def caching_hook(self, hook_point_out: torch.Tensor, hook: HookPoint):
@@ -332,34 +334,37 @@ def edge_level_corr(masked_model: MaskedTransformer, use_pos_embed:bool=None) ->
     if use_pos_embed is None:
         use_pos_embed = masked_model.use_pos_embed
     corr = TLACDCCorrespondence.setup_from_model(masked_model.model, use_pos_embed=use_pos_embed)
-    # Sample masks for all edges
-    masks = dict()
-    for name in masked_model._mask_logits_dict.keys():
-        sampled_mask = masked_model.sample_mask(name)
-        masks[name] = sampled_mask
     # Define edges
-    def index(name):
-        return TorchIndex((None,) if 'mlp' in name or 'resid' in name or 'embed' in name or name == 'blocks.0.hook_resid_pre' \
-                          else (None, None, 0))
-    for child, sampled_mask in masks.items():
-        # not sure if this is the right way to do indexing
-        child_index = index(child)
-        parents = masked_model.parent_node_names[child]
-        for i, parent in enumerate(parents):
-            parent_index = index(parent)
-
-            edge = corr.edges[child][child_index][parent][parent_index]
-            edge.present = (sampled_mask[i] >= 0.5).item()
-            edge.effect_size = sampled_mask[i].item()
+    def indexes(name):
+        if 'mlp' in name or 'resid' in name or 'embed' in name or name == 'blocks.0.hook_resid_pre':
+            return [TorchIndex((None,))]
+        return [TorchIndex((None, None, i)) for i in range(masked_model.n_heads)]
+    for child, mask_logits in masked_model._mask_logits_dict.items():
+        # Sample mask for this child
+        sampled_mask = masked_model.sample_mask(child)
+        # print(f"sampled mask for {child} has shape {sampled_mask.shape}")
+        mask_row  = 0
+        for parent in masked_model.parent_node_names[child]:
+            for parent_index in indexes(parent):
+                for mask_col, child_index in enumerate(indexes(child)):
+                    # print(f"Setting edge {child} {child_index} <- {parent} {parent_index} to {mask_row, mask_col}")
+                    # print(f"={sampled_mask[mask_row][mask_col]}")
+                    mask_value = sampled_mask[mask_row][mask_col].item()
+                    edge = corr.edges[child][child_index][parent][parent_index]
+                    edge.present = mask_value > 0.5
+                    edge.effect_size = mask_value
+                mask_row += 1
     
-    # Delete a node's incoming edges if it has no outgoing edges
+    # Delete a node's incoming edges if it has no outgoing edges and is not the output
     def get_nodes_with_out_edges(corr):
         nodes_with_out_edges = set()
         for (receiver_name, receiver_index, sender_name, sender_index), edge in corr.all_edges().items():
             nodes_with_out_edges.add(sender_name)
         return nodes_with_out_edges
+    
+    nodes_to_keep = get_nodes_with_out_edges(corr) | {f"blocks.{masked_model.model.cfg.n_layers - 1}.hook_resid_post"}
     for (receiver_name, receiver_index, sender_name, sender_index), edge in corr.all_edges().items():
-        if receiver_name not in get_nodes_with_out_edges(corr):
+        if receiver_name not in nodes_to_keep:
             edge.present = False
     return corr
 
@@ -489,7 +494,7 @@ def train_sp(
 
 
     if args.zero_ablation:
-        valid_context_args, test_context_args = dict(ablation='zero')
+        valid_context_args = test_context_args = dict(ablation='zero')
     else:
         valid_context_args = dict(ablation='resample', ablation_data=all_task_things.validation_patch_data)
         test_context_args = dict(ablation='resample', ablation_data=all_task_things.test_patch_data)
@@ -512,8 +517,12 @@ def train_sp(
         trainer.step()
 
         if epoch % print_every == 0 and args.print_stats:
-            corr = edge_level_corr(masked_model)
-            stats = print_stats(corr, canonical_circuit_subgraph, do_print=False)
+            statss = []
+            for i in range(3): # sample multiple times to get average edge_tpr etc.
+                corr = edge_level_corr(masked_model)
+                stats = print_stats(corr, canonical_circuit_subgraph, do_print=False)
+                statss.append(stats)
+            stats = {k: sum(s[k] for s in statss) / len(statss) for k in statss[0]}
             with masked_model.with_fwd_hooks_and_new_cache(**test_context_args) as hooked_model:
                 test_metric_loss = all_task_things.validation_metric(hooked_model(all_task_things.test_data))
             test_loss = test_metric_loss + regularizer_term * lambda_reg
@@ -631,7 +640,7 @@ if __name__ == "__main__":
             device=torch.device(args.device),
             metric_name=args.loss_type,
         )
-        get_true_edges = get_ioi_true_edges
+        get_true_edges = lambda: get_ioi_true_edges(all_task_things.tl_model)
     elif args.task == "induction":
         all_task_things = get_all_induction_things(
             args.num_examples,

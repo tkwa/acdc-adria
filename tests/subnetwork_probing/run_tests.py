@@ -75,7 +75,7 @@ def test_reverse_gt_correct():
         task="reverse", metric_name="l2", num_examples=30, device=torch.device("cpu")
     )
     gt_edges = get_tracr_reverse_edges()
-    masked_model = MaskedTransformer(all_task_things.tl_model, no_ablate=True, use_pos_embed=True)
+    masked_model = MaskedTransformer(all_task_things.tl_model, use_pos_embed=True)
     masked_model.freeze_weights()
 
     # Zero out the model logits...
@@ -224,9 +224,9 @@ def test_2_edge_circuit():
     for logit_name in masked_model._mask_logits_dict:
         masked_model._mask_logits_dict[logit_name].data.fill_(-10)
 
-    for p, c in edge_names:
-        c_index = masked_model.parent_node_names[p].index(c)
-        masked_model._mask_logits_dict[p].data[c_index] = 10
+    for c, p in edge_names:
+        c_index = masked_model.parent_node_names[c].index(p)
+        masked_model._mask_logits_dict[c].data[c_index] = 10
 
     out1 = masked_model.model(all_tracr_things.validation_data)
     context_args = dict(ablation='resample', ablation_data=all_tracr_things.validation_patch_data)
