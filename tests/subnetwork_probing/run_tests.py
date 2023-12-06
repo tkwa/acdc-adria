@@ -32,7 +32,7 @@ from transformer_lens.HookedTransformer import HookedTransformer
 # test_cache_writeable_forward_pass()
 # %%
 all_tracr_things = get_all_tracr_things(
-    task="reverse", metric_name="l2", num_examples=6, device=torch.device("cpu")
+    task="reverse", metric_name="l2", num_examples=30, device=torch.device("cpu")
 )
 masked_model = MaskedTransformer(all_tracr_things.tl_model, use_pos_embed=True)
 # %%
@@ -72,7 +72,7 @@ def test_reverse_gt_correct():
     Tests that the ground truth circuit is a complete description of the model on the reverse task
     """
     all_task_things = get_all_tracr_things(
-        task="reverse", metric_name="l2", num_examples=6, device=torch.device("cpu")
+        task="reverse", metric_name="l2", num_examples=30, device=torch.device("cpu")
     )
     gt_edges = get_tracr_reverse_edges()
     masked_model = MaskedTransformer(all_task_things.tl_model, no_ablate=True, use_pos_embed=True)
@@ -121,10 +121,10 @@ def test_empty_circuit():
     - Regularization loss should be low.
     - Loss should be high.
     """
-    all_task_things = get_all_tracr_things(
-        task="reverse", metric_name="l2", num_examples=6, device=torch.device("cpu")
+    all_tracr_things = get_all_tracr_things(
+        task="reverse", metric_name="l2", num_examples=30, device=torch.device("cpu")
     )
-    masked_model = MaskedTransformer(all_task_things.tl_model, use_pos_embed=True)
+    masked_model = MaskedTransformer(all_tracr_things.tl_model, use_pos_embed=True)
     masked_model.freeze_weights()
 
     for logit_name in masked_model._mask_logits_dict:
@@ -135,6 +135,7 @@ def test_empty_circuit():
     out1 = masked_model.model(all_tracr_things.validation_patch_data)
     with masked_model.with_fwd_hooks_and_new_cache(**context_args) as hooked_model:
         out2 = hooked_model(all_tracr_things.validation_data)
+
     assert masked_model.ablation_cache.keys() == masked_model.forward_cache.keys()
     matching_cache_keys = set()
     differing_cache_keys = set()
@@ -144,7 +145,6 @@ def test_empty_circuit():
             matching_cache_keys.add(key)
         else:
             differing_cache_keys.add(key)
-
     print(f"Matching cache keys: {matching_cache_keys}")
     print(f"Differing cache keys: {differing_cache_keys}")
     assert "hook_embed" in differing_cache_keys, "hook_embed should be different"
@@ -153,7 +153,7 @@ def test_empty_circuit():
     assert torch.allclose(out1, out2), "Outputs of the masked model and the unmasked model on patch data are not close"
 
     # labels=all_tracr_things.validation_metric.keywords['model_out'].argmax(dim=-1)
-    specific_metric_term = all_task_things.validation_metric(out2)
+    specific_metric_term = all_tracr_things.validation_metric(out2)
     reg_loss = masked_model.regularization_loss()
     print(f"Regularization loss of resample is {reg_loss}")
     assert reg_loss < 0.1, "Resample has too high regularization loss"
@@ -174,20 +174,21 @@ def test_ablate_output_circuit():
     - The output should match output on patched data.
     - Metric loss should be high.
     """
-    all_task_things = get_all_tracr_things(
-        task="reverse", metric_name="l2", num_examples=6, device=torch.device("cpu")
+    all_tracr_things = get_all_tracr_things(
+        task="reverse", metric_name="l2", num_examples=30, device=torch.device("cpu")
     )
-    masked_model = MaskedTransformer(all_task_things.tl_model, use_pos_embed=True)
+    masked_model = MaskedTransformer(all_tracr_things.tl_model, use_pos_embed=True)
     masked_model.freeze_weights()
 
-    output_logit_name = f"blocks.{masked_model.model.cfg.n_layers - 1}.resid_post"
+    output_logit_name = f"blocks.{masked_model.model.cfg.n_layers - 1}.hook_resid_post"
     for logit_name in masked_model._mask_logits_dict:
-        masked_model._mask_logits_dict[logit_name].data.fill_(-10 if logit_name == output_logit_name else 10)
+        masked_model._mask_logits_dict[logit_name].data.fill_(10)
+    masked_model._mask_logits_dict[output_logit_name].data.fill_(-10)
 
-    context_args = dict(ablation='resample', ablation_data=all_tracr_things.validation_patch_data)
 
     out0, cache = masked_model.model.run_with_cache(all_tracr_things.validation_data)
     out1 = masked_model.model(all_tracr_things.validation_patch_data)
+    context_args = dict(ablation='resample', ablation_data=all_tracr_things.validation_patch_data)
     with masked_model.with_fwd_hooks_and_new_cache(**context_args) as hooked_model:
         out2 = hooked_model(all_tracr_things.validation_data)
 
@@ -200,7 +201,41 @@ def test_ablate_output_circuit():
     assert torch.allclose(out1, out2), \
         f"Outputs of masked model and unmasked model on patch data are not close: total diff={diff:.6f} on {n_different_elements} elements"
         
-    specific_metric_term = all_task_things.validation_metric(out2)
+    specific_metric_term = all_tracr_things.validation_metric(out2)
     assert specific_metric_term > 0.1, "Resample has too low metric loss"
-test_resid_post_circuit()
+test_ablate_output_circuit()
+# %%
+
+def test_2_edge_circuit():
+    """
+    Test a particular 2-edge circuit found by SP; is it valid?
+    """
+    edge_names = [
+        ("blocks.3.hook_v_input", "hook_embed"),
+        # ("blocks.2.hook_mlp_in", "blocks.1.attn.hook_result"),
+        ("blocks.3.hook_resid_post", "blocks.3.attn.hook_result")
+    ]
+    all_task_things = get_all_tracr_things(
+        task="reverse", metric_name="l2", num_examples=30, device=torch.device("cpu")
+    )
+    masked_model = MaskedTransformer(all_task_things.tl_model, use_pos_embed=True)
+    masked_model.freeze_weights()
+
+    for logit_name in masked_model._mask_logits_dict:
+        masked_model._mask_logits_dict[logit_name].data.fill_(-10)
+
+    for p, c in edge_names:
+        c_index = masked_model.parent_node_names[p].index(c)
+        masked_model._mask_logits_dict[p].data[c_index] = 10
+
+    out1 = masked_model.model(all_tracr_things.validation_data)
+    context_args = dict(ablation='resample', ablation_data=all_tracr_things.validation_patch_data)
+    # context_args = dict(ablation='zero')
+    with masked_model.with_fwd_hooks_and_new_cache(**context_args) as hooked_model:
+        out2 = hooked_model(all_tracr_things.validation_data)
+
+    diff = (out1 - out2).abs().sum()
+    n_different_elements = (out1 != out2).sum()
+    assert torch.allclose(out1, out2), f"Outputs of the masked model and the unmasked model are not close: total diff={diff:.6f} on {n_different_elements} elements"
+test_2_edge_circuit()
 # %%
