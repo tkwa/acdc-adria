@@ -111,7 +111,6 @@ class MaskedTransformer(torch.nn.Module):
     forward_cache: ActivationCache
     mask_logits: torch.nn.ParameterList
     # what is the purpose of this? why can't you just use dict.keys()? -tkwa
-    mask_logits_names: List[str]
     _mask_logits_dict: Dict[str, torch.nn.Parameter]
 
     def __init__(self, model:HookedTransformer, beta=2 / 3, gamma=-0.1, zeta=1.1, mask_init_p=0.9, use_pos_embed=False, no_ablate=False, verbose=False):
@@ -121,7 +120,6 @@ class MaskedTransformer(torch.nn.Module):
         self.n_heads = model.cfg.n_heads
         self.n_mlp = 0 if model.cfg.attn_only else 1
         self.mask_logits = torch.nn.ParameterList()
-        self.mask_logits_names = []
         self._mask_logits_dict = {}
         self.no_ablate = no_ablate
         if no_ablate:
@@ -194,6 +192,10 @@ class MaskedTransformer(torch.nn.Module):
         for ckl in self.parent_node_names.values():
             for name in ckl: assert name in self.forward_cache_names, f"{name} not in forward cache names"
 
+    @property
+    def mask_logits_names(self):
+        return self._mask_logits_dict.keys()
+
     def _setup_mask_logits(self, mask_name, parent_nodes, out_dim):
         """
         Adds a mask logit for the given mask name and parent nodes
@@ -203,7 +205,6 @@ class MaskedTransformer(torch.nn.Module):
         self.mask_logits.append(torch.nn.Parameter(
             torch.full((sum((self.n_heads if 'attn' in n else 1 for n in parent_nodes)), out_dim), self.mask_init_constant, device=self.device)
         ))
-        self.mask_logits_names.append(mask_name)
         self._mask_logits_dict[mask_name] = self.mask_logits[-1]
 
     def sample_mask(self, mask_name) -> torch.Tensor:
