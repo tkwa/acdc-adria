@@ -4,6 +4,8 @@ import argparse
 import gc
 import random
 from typing import Callable
+import pickle
+import os
 
 import torch
 import wandb
@@ -17,12 +19,20 @@ from acdc.greaterthan.utils import get_all_greaterthan_things, get_greaterthan_t
 from acdc.induction.utils import get_all_induction_things #, get_induction_true_edges
 from acdc.ioi.utils import get_all_ioi_things, get_ioi_true_edges
 from acdc.TLACDCCorrespondence import TLACDCCorrespondence
-from acdc.TLACDCEdge import Edge
+from acdc.TLACDCEdge import Edge, EdgeType
 from acdc.tracr_task.utils import get_all_tracr_things
 from subnetwork_probing.sp_utils import MaskedTransformer, edge_level_corr, print_stats, set_ground_truth_edges
 
+def save_edges(corr: TLACDCCorrespondence, fname: str):
+        edges_list = []
+        for t, e in corr.all_edges().items():
+            if e.present and e.edge_type != EdgeType.PLACEHOLDER:
+                edges_list.append((t, e.effect_size))
 
-def train_sp(
+        with open(fname, "wb") as f:
+            pickle.dump(edges_list, f)
+
+def train_edge_sp(
     args,
     masked_model: MaskedTransformer,
     all_task_things: AllDataThings,
@@ -115,7 +125,16 @@ def train_sp(
             # corr, _ = iterative_correspondence_from_mask(masked_model.model, nodes_to_mask)
             # print_stats(corr, d_trues, canonical_circuit_subgraph)
 
+    # Save edges to create data for plots later
+    corr = edge_level_corr(masked_model)
+    edges_fname = f"edges.pkl"
+    save_edges(corr, edges_fname)
+    artifact = wandb.Artifact(edges_fname, type="dataset")
+    artifact.add_file(edges_fname)
+    wandb.log_artifact(artifact)
+    os.remove(edges_fname)
 
+    # Now calculate final metrics
     with torch.no_grad():
         # The loss has a lot of variance so let's just average over a few runs with the same seed
         rng_state = torch.random.get_rng_state()
@@ -259,7 +278,7 @@ if __name__ == "__main__":
 
     masked_model.freeze_weights()
     print("Finding subnetwork...")
-    masked_model, log_dict = train_sp(
+    masked_model, log_dict = train_edge_sp(
         args=args,
         masked_model=masked_model,
         all_task_things=all_task_things,
