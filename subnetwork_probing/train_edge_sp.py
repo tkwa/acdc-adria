@@ -240,7 +240,7 @@ if __name__ == "__main__":
             device=torch.device(args.device),
             metric=args.loss_type,
         )
-        get_true_edges = get_induction_true_edges # missing because there is no canonical induction circuit -tkwa
+        # get_true_edges = get_induction_true_edges # missing because there is no canonical induction circuit -tkwa
     elif args.task == "tracr-reverse":
         all_task_things = get_all_tracr_things(
             task="reverse", metric_name=args.loss_type, num_examples=args.num_examples, device=torch.device(args.device)
