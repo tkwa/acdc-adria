@@ -30,7 +30,8 @@ RUN "$POETRY" config virtualenvs.create false \
 # Copy whole repo
 COPY --chown=root:root . .
 # Abort if repo is dirty
-RUN if ! { [ -z "$(git status --porcelain --ignored=traditional)" ] \
+# RUN if ! { [ -z "$(git status --porcelain --ignored=traditional)" ] \
+RUN if ! { [ -z "$(git status --porcelain)" ] \
     ; }; then exit 1; fi
 
 # Finally install this package
