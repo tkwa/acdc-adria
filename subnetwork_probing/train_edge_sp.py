@@ -127,7 +127,7 @@ def train_edge_sp(
 
     # Save edges to create data for plots later
     corr = edge_level_corr(masked_model)
-    edges_fname = f"edges.pkl"
+    edges_fname = f"edges.pth" # note this is a pickle file
     save_edges(corr, edges_fname)
     artifact = wandb.Artifact(edges_fname, type="dataset")
     artifact.add_file(edges_fname)
