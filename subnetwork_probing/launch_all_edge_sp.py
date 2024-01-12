@@ -1,7 +1,9 @@
-from experiments.launcher import KubernetesJob, WandbIdentifier, launch
+# from experiments.launcher import KubernetesJob, WandbIdentifier, launch
 import numpy as np
 import random
 from typing import List, Optional
+import subprocess
+import sys
 
 METRICS_FOR_TASK = {
     "ioi": ["kl_div", "logit_diff"],
@@ -12,8 +14,10 @@ METRICS_FOR_TASK = {
     "greaterthan": ["kl_div", "greaterthan"],
 }
 
-
-def main(TASKS: list[str], job: Optional[KubernetesJob], name: str, testing: bool, reset_networks: bool):
+def make_yamls(TASKS: list[str], testing: bool, reset_networks: bool, template_filename:str, container:str) -> list[str]:
+    """
+    Takes a yaml file template and creates many yaml files to pass to kubectl.
+    """
     NUM_SPACINGS = 5 if reset_networks else 21
     expensive_base_regularization_params = np.concatenate(
         [
@@ -28,16 +32,11 @@ def main(TASKS: list[str], job: Optional[KubernetesJob], name: str, testing: boo
     else:
         base_regularization_params = expensive_base_regularization_params
 
-    wandb_identifier = WandbIdentifier(
-        run_name=f"{name}-res{int(reset_networks)}-{{i:05d}}",
-        group_name="tracr-shuffled-redo",
-        project="induction-sp-replicate")
-
-
     seed = 1507014021
     random.seed(seed)
 
-    commands: List[List[str]] = []
+    yamls: List[List[str]] = []
+    i = 0
     for reset_network in [int(reset_networks)]:
         for zero_ablation in [0, 1]:
             for task in TASKS:
@@ -102,25 +101,24 @@ def main(TASKS: list[str], job: Optional[KubernetesJob], name: str, testing: boo
                     else:
                         raise ValueError("Unknown task")
 
-                    if job is None:
-                        device = "cpu"
-                        n_cpu = 4
-                        assert testing
-                    else:
-                        device = "cuda" if job.gpu else "cpu"
-                        n_cpu = job.cpu
-
                     for lambda_reg in [0.01] if testing else regularization_params:
+
+                        # should do this simpler way
+                        wandb_project = "subnetwork-probing"
+                        wandb_entity = "tkwa-team"
+                        wandb_group = f"edge_sp_group_1"
+                        wandb_name = f"tkwa-sp-{task}-{i:05d}{'-optional' if task in ['induction', 'docstring'] else ''}"
+
                         command = [
                             "python",
-                            "subnetwork_probing/train.py",
+                            "subnetwork_probing/train_edge_sp.py",
                             f"--task={task}",
                             f"--lambda-reg={lambda_reg:.3f}",
-                            f"--wandb-name=agarriga-sp-{len(commands):05d}{'-optional' if task in ['induction', 'docstring'] else ''}",
-                            "--wandb-project=induction-sp-replicate",
-                            "--wandb-entity=remix_school-of-rock",
-                            "--wandb-group=tracr-shuffled-redo",
-                            f"--device={device}",
+                            f"--wandb-name={wandb_name}",
+                            f"--wandb-project={wandb_project}",
+                            f"--wandb-entity={wandb_entity}",
+                            f"--wandb-group={wandb_group}",
+                            f"--device={'cuda'}",
                             f"--epochs={1 if testing else 10000}",
                             f"--zero-ablation={zero_ablation}",
                             f"--reset-subject={reset_network}",
@@ -131,31 +129,58 @@ def main(TASKS: list[str], job: Optional[KubernetesJob], name: str, testing: boo
                             f"--n-loss-average-runs={1 if testing else 20}",
                             "--wandb-dir=/training",  # If it doesn't exist wandb will use /tmp
                             f"--wandb-mode={'offline' if testing else 'online'}",
-                            f"--torch-num-threads={n_cpu}",
+                            f"--torch-num-threads={4}",
                         ]
-                        commands.append(command)
 
-    launch(
-        commands,
-        name=name,
-        job=job,
-        synchronous=True,
-        check_wandb=wandb_identifier,
-        just_print_commands=False,
-    )
+                        template = open(template_filename).read()
+                        yaml = template.format(
+                            COMMAND=" ".join(command),
+                            CONTAINER=container,
+                            NAME=f"sp-{task}-{i:05d}",
+                            WANDB_GROUP = wandb_group,
+                            WANDB_PROJECT = wandb_project,
+                            WANDB_JOB_NAME = wandb_name,
+                            WANDB_ENTITY = wandb_entity,
+                            LAUNCH_ID = f"sp-{task}-{i:05d}",
+                            COMMIT_HASH = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True).stdout.decode().strip(),
+                            CPU = 4,
+                            MEMORY = "16Gi",
+                            GPU = 0 if task.startswith("tracr") else 1,
+                            OMP_NUM_THREADS = "'4'", # is this right?
+                            TRAINING_MOUNT = "/training",
+                        )
+
+                        yamls.append(yaml)
+                        i += 1
+    return yamls
+
 
 if __name__ == "__main__":
-    for reset_networks in [False, True]:
-        for task in ["tracr-reverse"]:
-            main(
-                [task],
-                KubernetesJob(
-                    container="ghcr.io/rhaps0dy/automatic-circuit-discovery:1.7.2",
-                    cpu=4,
-                    gpu=0 if task.startswith("tracr") else 1,
-                    mount_training=False,
-                ),
-                name=f"sp-{task}",
-                testing=False,
-                reset_networks=reset_networks,
-            )
+    for reset_networks in [False]:
+        tasks = ["tracr-proportion"]
+        # main(
+        #     [task],
+        #     KubernetesJob(
+        #         container="ghcr.io/tkwa/subnetwork_probing:v1",
+        #         cpu=4,
+        #         gpu=0 if task.startswith("tracr") else 1,
+        #         mount_training=False,
+        #     ),
+        #     name=f"sp-{task}",
+        #     testing=False,
+        #     reset_networks=reset_networks,
+        # )
+        yamls_list = make_yamls(
+            tasks,
+            testing=False,
+            reset_networks=reset_networks,
+            template_filename="subnetwork_probing/runner_template.yaml",
+            container = "ghcr.io/tkwa/subnetwork_probing:v1",
+        )
+        if '--launch-one' in sys.argv:
+            yamls_list = yamls_list[:1]
+            print(yamls_list[0])
+        yamls_for_all_jobs = "\n\n---\n\n".join(yamls_list)
+        if not any(s in sys.argv for s in ["--dryrun", "--dry-run", "-d"]):
+            print(f"Launching {len(yamls_list)} jobs")
+            subprocess.run(["kubectl", "create", "-f", "-"], check=True, input=yamls_for_all_jobs.encode())
