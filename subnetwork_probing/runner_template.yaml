@@ -18,11 +18,8 @@ spec:
       securityContext:
         runAsUser: 1001
         runAsGroup: 1001
-      priorityClassName: interactive
-      volumes:
-      - name: training
-        persistentVolumeClaim:
-          claimName: lp-training-storage
+      priorityClassName: low-batch
+  
       containers:
       - name: devbox-container
         image: "{CONTAINER}"
@@ -30,7 +27,7 @@ spec:
           - bash
           - -c
           - |
-            git pull; git checkout {COMMIT_HASH}; git submodule update --recursive; {COMMAND}
+            mkdir /tmp/training; git pull; git checkout {COMMIT_HASH}; git submodule update --recursive; {COMMAND}
         resources:
           requests:
             cpu: {CPU}
@@ -40,20 +37,11 @@ spec:
         env:
         - name: OMP_NUM_THREADS
           value: {OMP_NUM_THREADS}
-        - name: GIT_ASKPASS
-          value: "true"
-        - name: GITHUB_PAT
-          valueFrom:
-            secretKeyRef:
-              name: github-credentials
-              key: pat
-        - name: GIT_CONFIG_PARAMETERS
-          value: "'credential.https://github.com.username=$(GITHUB_PAT)'"
         - name: WANDB_API_KEY
           valueFrom:
             secretKeyRef:
               name: wandb
-              key: api-key
+              key: api_key
         - name: WANDB_ENTITY
           value: {WANDB_ENTITY}
         - name: WANDB_JOB_NAME
@@ -62,9 +50,12 @@ spec:
           value: {WANDB_PROJECT}
         - name: WANDB_GROUP
           value: {WANDB_GROUP}
-        volumeMounts:
-        - name: training
-          mountPath: {TRAINING_MOUNT}
+        - name: WANDB_DIR
+          value: "/tmp/training"
+        - name: WANDB_CACHE_DIR
+          value: "/tmp/cache"
+        - name: WANDB_CONFIG_DIR
+          value: "/tmp/config"
       restartPolicy: Never
       imagePullSecrets:
       - name: docker

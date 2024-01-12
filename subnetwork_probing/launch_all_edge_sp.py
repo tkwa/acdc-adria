@@ -106,7 +106,7 @@ def make_yamls(TASKS: list[str], testing: bool, reset_networks: bool, template_f
                         # should do this simpler way
                         wandb_project = "subnetwork-probing"
                         wandb_entity = "tkwa-team"
-                        wandb_group = f"edge_sp_group_1"
+                        wandb_group = f"edge_sp_group_2"
                         wandb_name = f"tkwa-sp-{task}-{i:05d}{'-optional' if task in ['induction', 'docstring'] else ''}"
 
                         command = [
@@ -118,7 +118,7 @@ def make_yamls(TASKS: list[str], testing: bool, reset_networks: bool, template_f
                             f"--wandb-project={wandb_project}",
                             f"--wandb-entity={wandb_entity}",
                             f"--wandb-group={wandb_group}",
-                            f"--device={'cuda'}",
+                            f"--device={'cpu' if task.startswith('tracr') else 'cuda'}",
                             f"--epochs={1 if testing else 10000}",
                             f"--zero-ablation={zero_ablation}",
                             f"--reset-subject={reset_network}",
@@ -127,10 +127,11 @@ def make_yamls(TASKS: list[str], testing: bool, reset_networks: bool, template_f
                             f"--num-examples={6 if testing else num_examples}",
                             f"--seq-len={seq_len}",
                             f"--n-loss-average-runs={1 if testing else 20}",
-                            "--wandb-dir=/training",  # If it doesn't exist wandb will use /tmp
+                            "--wandb-dir=/tmp/training",  # If it doesn't exist wandb will use /tmp
                             f"--wandb-mode={'offline' if testing else 'online'}",
                             f"--torch-num-threads={4}",
                         ]
+                        if i==0: print(" ".join(command))
 
                         template = open(template_filename).read()
                         yaml = template.format(
@@ -147,7 +148,6 @@ def make_yamls(TASKS: list[str], testing: bool, reset_networks: bool, template_f
                             MEMORY = "16Gi",
                             GPU = 0 if task.startswith("tracr") else 1,
                             OMP_NUM_THREADS = "'4'", # is this right?
-                            TRAINING_MOUNT = "/training",
                         )
 
                         yamls.append(yaml)
