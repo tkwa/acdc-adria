@@ -3,7 +3,8 @@ import torch
 # from tests.subnetwork_probing.test_masked_hookpoint import test_cache_writeable_forward_pass
 from acdc.tracr_task.utils import get_all_tracr_things
 from acdc.docstring.utils import get_all_docstring_things
-from subnetwork_probing.train import MaskedTransformer, train_sp, edge_level_corr, print_stats
+from subnetwork_probing.train import MaskedTransformer, train_sp
+from subnetwork_probing.sp_utils import edge_level_corr, print_stats
 from acdc.TLACDCCorrespondence import TLACDCCorrespondence
 from acdc.docstring.utils import AllDataThings, get_all_docstring_things, get_docstring_subgraph_true_edges
 from acdc.tracr_task.utils import get_tracr_proportion_edges, get_tracr_reverse_edges
