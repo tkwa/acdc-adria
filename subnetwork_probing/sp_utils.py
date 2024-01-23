@@ -160,27 +160,28 @@ class MaskedTransformer(torch.nn.Module):
 
         self.embeds = ["hook_embed", "hook_pos_embed"] if self.use_pos_embed else \
                       ["blocks.0.hook_resid_pre"]
+        
+        self.parent_nodes = self.embeds[:]
         # Add mask logits for ablation cache
         # Mask logits have a variable dimension depending on the number of in-edges (increases with layer)
         for layer_i in range(model.cfg.n_layers):
             # QKV: in-edges from all previous layers
             for q_k_v in ["q", "k", "v"]:
-
                 self._setup_mask_logits(
                     mask_name=f"blocks.{layer_i}.hook_{q_k_v}_input",
-                    parent_nodes=([f"blocks.{l}.attn.hook_result" for l in range(layer_i)] + \
-                                    ([f"blocks.{l}.hook_mlp_out" for l in range(layer_i)] if not model.cfg.attn_only else []) + self.embeds),
+                    parent_nodes=self.parent_nodes,
                     out_dim=self.n_heads)
+                
+            self.parent_nodes.append(f"blocks.{layer_i}.attn.hook_result")
 
             # MLP: in-edges from all previous layers and current layer's attention heads
             if not model.cfg.attn_only:
-                parent_nodes = (
-                    [f"blocks.{l}.attn.hook_result" for l in range(layer_i + 1)] + \
-                    [f"blocks.{l}.hook_mlp_out" for l in range(layer_i)] + self.embeds)
                 self._setup_mask_logits(
                     mask_name = f"blocks.{layer_i}.hook_mlp_in",
-                    parent_nodes=parent_nodes,
+                    parent_nodes=self.parent_nodes,
                     out_dim=1)
+                
+                self.parent_nodes.append(f"blocks.{layer_i}.hook_mlp_out")
 
         self._setup_mask_logits(
             mask_name = f"blocks.{model.cfg.n_layers - 1}.hook_resid_post",
@@ -210,9 +211,11 @@ class MaskedTransformer(torch.nn.Module):
         Adds a mask logit for the given mask name and parent nodes
         Parent nodes are (attention, MLP)
         """
+        in_dim=sum((self.n_heads if 'attn' in n else 1 for n in parent_nodes))
+        parent_nodes = parent_nodes[:]
         self.parent_node_names[mask_name] = parent_nodes
         self.mask_logits.append(torch.nn.Parameter(
-            torch.full((sum((self.n_heads if 'attn' in n else 1 for n in parent_nodes)), out_dim), self.mask_init_constant, device=self.device)
+            torch.full((in_dim, out_dim), self.mask_init_constant, device=self.device)
         ))
         self._mask_logits_dict[mask_name] = self.mask_logits[-1]
 
