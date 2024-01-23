@@ -164,6 +164,7 @@ class MaskedTransformer(torch.nn.Module):
                       ["blocks.0.hook_resid_pre"]
         
         self.forward_cache_names = self.embeds[:]
+        self.cache_indices_dict = {name: (i, i + 1) for i, name in enumerate(self.forward_cache_names)}
         self.n_units_so_far = len(self.embeds)
         # Add mask logits for ablation cache
         # Mask logits have a variable dimension depending on the number of in-edges (increases with layer)
@@ -236,6 +237,11 @@ class MaskedTransformer(torch.nn.Module):
             for scores in self.mask_logits
         ]
         return torch.mean(torch.stack(per_parameter_loss))
+    
+    @staticmethod
+    def make_4d(x):
+        if x.ndim == 3: return x.unsqueeze(2)
+        return x
 
     def do_zero_caching(self):
         """Caches zero for every possible mask point.
@@ -244,6 +250,7 @@ class MaskedTransformer(torch.nn.Module):
         self.do_random_resample_caching(patch_data)
         self.ablation_cache.cache_dict = \
             {name: torch.zeros_like(scores) for name, scores in self.ablation_cache.cache_dict.items()}
+        self.a_cache_tensor = torch.cat([self.make_4d(self.ablation_cache[name]) for name in self.forward_cache_names], dim=2)
 
     def do_random_resample_caching(self, patch_data) -> None:
         # Only cache the tensors needed to fill the masked out positions
@@ -251,6 +258,8 @@ class MaskedTransformer(torch.nn.Module):
             model_out, self.ablation_cache = self.model.run_with_cache(
                 patch_data, names_filter=lambda name: name in self.forward_cache_names, return_cache_object=True
             )
+            self.a_cache_tensor = torch.cat([self.make_4d(self.ablation_cache[name]) for name in self.forward_cache_names], dim=2)
+
 
     def get_activation_values(self, names, cache:ActivationCache):
         """
@@ -319,6 +328,11 @@ class MaskedTransformer(torch.nn.Module):
 
     def caching_hook(self, hook_point_out: torch.Tensor, hook: HookPoint):
         self.forward_cache.cache_dict[hook.name] = hook_point_out
+        start, end = self.cache_indices_dict[hook.name]
+        if self.f_cache_tensor is None:
+            batch, seq, d_model = hook_point_out.shape
+            self.f_cache_tensor = torch.zeros((batch, seq, self.n_units_so_far, d_model), device=self.device)
+        self.f_cache_tensor[:, :, start:end, :] = self.make_4d(hook_point_out)
         return hook_point_out
 
     def fwd_hooks(self) -> List[Tuple[str, Callable]]:
