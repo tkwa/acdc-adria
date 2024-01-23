@@ -142,10 +142,12 @@ class MaskedTransformer(torch.nn.Module):
         # e.g. ...1.hook_mlp_in -> ["blocks.0.attn.hook_result", "blocks.0.hook_mlp_out", "blocks.1.attn.hook_result"]
         # Logits are attention in-edges, then MLP in-edges
         self.parent_node_names:Dict[str, list[str]] = {}
-        self.forward_cache_names = []
 
         self.ablation_cache = ActivationCache({}, self.model)
         self.forward_cache = ActivationCache({}, self.model)
+        self.a_cache_tensor = None
+        self.f_cache_tensor = None
+        self.cache_indices_dict = {} # Converts a hook name to an integer representing how far to index?
         # Hyperparameters
         self.beta = beta
         self.gamma = gamma
@@ -161,7 +163,8 @@ class MaskedTransformer(torch.nn.Module):
         self.embeds = ["hook_embed", "hook_pos_embed"] if self.use_pos_embed else \
                       ["blocks.0.hook_resid_pre"]
         
-        self.parent_nodes = self.embeds[:]
+        self.forward_cache_names = self.embeds[:]
+        self.n_units_so_far = len(self.embeds)
         # Add mask logits for ablation cache
         # Mask logits have a variable dimension depending on the number of in-edges (increases with layer)
         for layer_i in range(model.cfg.n_layers):
@@ -169,35 +172,27 @@ class MaskedTransformer(torch.nn.Module):
             for q_k_v in ["q", "k", "v"]:
                 self._setup_mask_logits(
                     mask_name=f"blocks.{layer_i}.hook_{q_k_v}_input",
-                    parent_nodes=self.parent_nodes,
                     out_dim=self.n_heads)
                 
-            self.parent_nodes.append(f"blocks.{layer_i}.attn.hook_result")
+            self.forward_cache_names.append(f"blocks.{layer_i}.attn.hook_result")
+            self.cache_indices_dict[f"blocks.{layer_i}.attn.hook_result"] = (self.n_units_so_far, self.n_units_so_far + self.n_heads)
+            self.n_units_so_far += self.n_heads
 
             # MLP: in-edges from all previous layers and current layer's attention heads
             if not model.cfg.attn_only:
                 self._setup_mask_logits(
                     mask_name = f"blocks.{layer_i}.hook_mlp_in",
-                    parent_nodes=self.parent_nodes,
                     out_dim=1)
                 
-                self.parent_nodes.append(f"blocks.{layer_i}.hook_mlp_out")
+                self.forward_cache_names.append(f"blocks.{layer_i}.hook_mlp_out")
+                self.cache_indices_dict[f"blocks.{layer_i}.hook_mlp_out"] = (self.n_units_so_far, self.n_units_so_far + 1)
+                self.n_units_so_far += 1
 
         self._setup_mask_logits(
             mask_name = f"blocks.{model.cfg.n_layers - 1}.hook_resid_post",
-            parent_nodes=([f"blocks.{l}.attn.hook_result" for l in range(model.cfg.n_layers)] + \
-                          ([f"blocks.{l}.hook_mlp_out" for l in range(model.cfg.n_layers)] if not model.cfg.attn_only else []) + self.embeds),
             out_dim=1
         )
 
-        # Add hook points for forward cache
-        self.forward_cache_names.extend(
-            self.embeds) # not counted as a node in gt, but in resid stream
-        for layer_i in range(model.cfg.n_layers):
-            # print(f"adding forward cache for layer {layer_index}")
-            if not model.cfg.attn_only:
-                self.forward_cache_names.append(f"blocks.{layer_i}.hook_mlp_out")
-            self.forward_cache_names.append(f"blocks.{layer_i}.attn.hook_result")
         print(self.forward_cache_names, self.parent_node_names)
         for ckl in self.parent_node_names.values():
             for name in ckl: assert name in self.forward_cache_names, f"{name} not in forward cache names"
@@ -206,14 +201,13 @@ class MaskedTransformer(torch.nn.Module):
     def mask_logits_names(self):
         return self._mask_logits_dict.keys()
 
-    def _setup_mask_logits(self, mask_name, parent_nodes, out_dim):
+    def _setup_mask_logits(self, mask_name, out_dim):
         """
         Adds a mask logit for the given mask name and parent nodes
         Parent nodes are (attention, MLP)
         """
-        in_dim=sum((self.n_heads if 'attn' in n else 1 for n in parent_nodes))
-        parent_nodes = parent_nodes[:]
-        self.parent_node_names[mask_name] = parent_nodes
+        in_dim = self.n_units_so_far
+        self.parent_node_names[mask_name] = self.forward_cache_names[:]
         self.mask_logits.append(torch.nn.Parameter(
             torch.full((in_dim, out_dim), self.mask_init_constant, device=self.device)
         ))
