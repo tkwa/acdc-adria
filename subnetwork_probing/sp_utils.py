@@ -15,6 +15,7 @@ from transformer_lens import HookedTransformer
 
 import collections
 from typing import Callable, ContextManager, Dict, List, Optional, Tuple
+import torchviz
 
 def set_ground_truth_edges(canonical_circuit_subgraph: TLACDCCorrespondence, ground_truth_set: set):
     for (receiver_name, receiver_index, sender_name, sender_index), edge in canonical_circuit_subgraph.all_edges().items():
@@ -218,10 +219,17 @@ class MaskedTransformer(torch.nn.Module):
     def sample_mask(self, mask_name) -> torch.Tensor:
         """Samples a binary-ish mask from the mask_scores for the particular `mask_name` activation"""
         mask_scores = self._mask_logits_dict[mask_name]
-        uniform_sample = torch.zeros_like(mask_scores).uniform_().clamp_(0.0001, 0.9999)
+        uniform_sample = torch.zeros_like(mask_scores, requires_grad=False).uniform_().clamp_(0.0001, 0.9999)
         s = torch.sigmoid((uniform_sample.log() - (1 - uniform_sample).log() + mask_scores) / self.beta)
         s_bar = s * (self.zeta - self.gamma) + self.gamma
         mask = s_bar.clamp(min=0.0, max=1.0)
+        # print(f"Displaying grad tree of {mask_name}")
+        # def get_grad_tree(f):
+        #     if f is None: return str(f)
+        #     return f"{f} -> ({', '.join(get_grad_tree(tup[0]) for tup in f.next_functions)})"
+        # a = mask.grad_fn
+        # print(get_grad_tree(a))
+
         return mask
 
     def regularization_loss(self) -> torch.Tensor:
@@ -240,15 +248,14 @@ class MaskedTransformer(torch.nn.Module):
         self.ablation_cache.cache_dict = \
             {name: torch.zeros_like(scores) for name, scores in self.ablation_cache.cache_dict.items()}
 
-    def do_random_resample_caching(self, patch_data) -> torch.Tensor:
+    def do_random_resample_caching(self, patch_data) -> None:
         # Only cache the tensors needed to fill the masked out positions
         with torch.no_grad():
             model_out, self.ablation_cache = self.model.run_with_cache(
                 patch_data, names_filter=lambda name: name in self.forward_cache_names, return_cache_object=True
             )
-        return model_out
 
-    def get_mask_values(self, names, cache:ActivationCache):
+    def get_activation_values(self, names, cache:ActivationCache):
         """
         Returns a single tensor of the mask values used for a given hook.
         Attention is shape batch, seq, heads, head_size while MLP out is batch, seq, d_model
@@ -265,20 +272,31 @@ class MaskedTransformer(torch.nn.Module):
         """
         For edge-level SP, we discard the hook_point_out value and resum the residual stream.
         """
+        print(f"Doing ablation of {hook.name}")
+        mem1 = torch.cuda.memory_allocated()
+        print(f"Using memory {mem1:_} bytes at hook start")
         is_attn = 'mlp' not in hook.name and 'resid_post' not in hook.name
-        # print(f"Doing ablation of {hook.name}")
         mask = self.sample_mask(hook.name) # in_edges, nodes_per_mask, ...
         if self.no_ablate: mask = torch.ones_like(mask) # for testing only
 
         # Get values from ablation cache and forward cache
         names = self.parent_node_names[hook.name]
-        a_values = self.get_mask_values(names, self.ablation_cache) # b s i d
-        f_values = self.get_mask_values(names, self.forward_cache) # b s i d
-        sqdiff_values = (a_values - f_values).pow(2).mean()
+        a_values = self.get_activation_values(names, self.ablation_cache) # b s i d
+        f_values = self.get_activation_values(names, self.forward_cache) # b s i d
+        # TODO avoid caching these with torch.checkpoint to compute weighted_a_values, weighted_f_values?
+        # computing the gradient myself would save even more RAM/compute but not worth it
+        mem3 = torch.cuda.memory_allocated()
+        print(f"Using memory {mem3:_} bytes at hook pos 3 (+{mem3 - mem1:_} bytes)")
 
         # Resum the residual stream
+        # why does this use twice the memory it should?
         weighted_a_values = torch.einsum("b s i d, i o -> b s o d", a_values, 1 - mask)
+        mem3_5 = torch.cuda.memory_allocated()
+        print(f"Using memory {mem3_5:_} bytes at hook pos 3.5 (+{mem3_5 - mem3:_} bytes)")
+
         weighted_f_values = torch.einsum("b s i d, i o -> b s o d", f_values, mask)
+        mem4 = torch.cuda.memory_allocated()
+        print(f"Using memory {mem4:_} bytes at hook pos 4 (+{mem4 - mem3_5:_} bytes)")
         out = weighted_a_values + weighted_f_values
         if not is_attn:
             out = rearrange(out, 'b s 1 d -> b s d')
@@ -294,11 +312,16 @@ class MaskedTransformer(torch.nn.Module):
         if self.verbose:
             no_change = torch.allclose(hook_point_out, out)
             absdiff = (hook_point_out - out).abs().mean()
+            sqdiff_values = (a_values - f_values).pow(2).mean()
             print(f"Ablation hook {'did NOT' if no_change else 'DID'} change {hook.name} by {absdiff:.3f} (caches differ by {sqdiff_values:.3f}, {mask.mean()=:.3f})")
+        mem_end = torch.cuda.memory_allocated()
+        print(f"Using memory {mem_end:_} bytes at hook end (+{mem_end - mem4:_} bytes)")
+        torch.cuda.empty_cache()
+        print(f"Using memory {torch.cuda.memory_allocated():_} bytes after clearing cache")
         return out
 
     def caching_hook(self, hook_point_out: torch.Tensor, hook: HookPoint):
-        self.forward_cache.cache_dict[hook.name] = hook_point_out.clone()
+        self.forward_cache.cache_dict[hook.name] = hook_point_out
         return hook_point_out
 
     def fwd_hooks(self) -> List[Tuple[str, Callable]]:

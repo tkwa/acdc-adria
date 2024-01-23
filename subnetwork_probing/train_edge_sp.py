@@ -39,6 +39,7 @@ def train_edge_sp(
     print_every:int=100,
     get_true_edges: Callable = None,
 ):
+    print(f"Using memory {torch.cuda.memory_allocated():_} bytes at training start")
     epochs = args.epochs
     lambda_reg = args.lambda_reg
 
@@ -75,7 +76,7 @@ def train_edge_sp(
     assert len(model_params) == 0, ("MODEL should be empty", model_params)
     trainer = torch.optim.Adam(mask_params, lr=args.lr)
 
-
+    print(f"Using memory {torch.cuda.memory_allocated():_} bytes after optimizer init")
     if args.zero_ablation:
         valid_context_args = test_context_args = dict(ablation='zero')
     else:
@@ -84,15 +85,19 @@ def train_edge_sp(
 
     # Get canonical subgraph so we can print TPR, FPR
     canonical_circuit_subgraph = TLACDCCorrespondence.setup_from_model(masked_model.model, use_pos_embed=masked_model.use_pos_embed)
-    d_trues = set(get_true_edges())
-    set_ground_truth_edges(canonical_circuit_subgraph, d_trues)
+    try:
+        d_trues = set(get_true_edges())
+        set_ground_truth_edges(canonical_circuit_subgraph, d_trues)
+    except:
+        pass
 
     for epoch in tqdm(range(epochs)):  # tqdm.notebook.tqdm(range(epochs)):
         masked_model.train()
         trainer.zero_grad()
-
         with masked_model.with_fwd_hooks_and_new_cache(**valid_context_args) as hooked_model:
+            print(f"Using memory {torch.cuda.memory_allocated():_} bytes before forward")
             metric_loss = all_task_things.validation_metric(hooked_model(all_task_things.validation_data))
+            print(f"Using memory {torch.cuda.memory_allocated():_} bytes after forward")
         regularizer_term = masked_model.regularization_loss()
         loss = metric_loss + regularizer_term * lambda_reg
         loss.backward()
@@ -103,8 +108,10 @@ def train_edge_sp(
             statss = []
             for i in range(3): # sample multiple times to get average edge_tpr etc.
                 corr = edge_level_corr(masked_model)
-                stats = print_stats(corr, canonical_circuit_subgraph, do_print=False)
-                statss.append(stats)
+                try:
+                    stats = print_stats(corr, canonical_circuit_subgraph, do_print=False)
+                    statss.append(stats)
+                except: pass
             stats = {k: sum(s[k] for s in statss) / len(statss) for k in statss[0]}
             with masked_model.with_fwd_hooks_and_new_cache(**test_context_args) as hooked_model:
                 test_metric_loss = all_task_things.validation_metric(hooked_model(all_task_things.test_data))
@@ -128,7 +135,11 @@ def train_edge_sp(
     # Save edges to create data for plots later
     corr = edge_level_corr(masked_model)
     edges_fname = f"edges.pth" # note this is a pickle file
-    save_edges(corr, edges_fname)
+    wandb_dir = os.environ.get("WANDB_DIR")
+    if wandb_dir is None:
+        save_edges(corr, edges_fname)
+    else:
+        save_edges(corr, os.path.join(wandb_dir, edges_fname))
     artifact = wandb.Artifact(edges_fname, type="dataset")
     artifact.add_file(edges_fname)
     wandb.log_artifact(artifact)
@@ -195,7 +206,7 @@ def proportion_of_binary_scores(model: MaskedTransformer) -> float:
     return binary_count / total_count
 
 
-parser = argparse.ArgumentParser("train_induction")
+parser = argparse.ArgumentParser("python train_edge_sp.py")
 parser.add_argument("--wandb-name", type=str, required=False)
 parser.add_argument("--wandb-project", type=str, default="subnetwork-probing")
 parser.add_argument("--wandb-entity", type=str, required=True)
@@ -269,7 +280,7 @@ if __name__ == "__main__":
             metric_name=args.loss_type,
             device=args.device,
         )
-        get_true_edges = get_greaterthan_true_edges
+        get_true_edges = lambda: get_greaterthan_true_edges(all_task_things.tl_model)
     else:
         raise ValueError(f"Unknown task {args.task}")
 
