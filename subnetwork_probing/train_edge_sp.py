@@ -95,9 +95,9 @@ def train_edge_sp(
         masked_model.train()
         trainer.zero_grad()
         with masked_model.with_fwd_hooks_and_new_cache(**valid_context_args) as hooked_model:
-            print(f"Using memory {torch.cuda.memory_allocated():_} bytes before forward")
+            # print(f"Using memory {torch.cuda.memory_allocated():_} bytes before forward")
             metric_loss = all_task_things.validation_metric(hooked_model(all_task_things.validation_data))
-            print(f"Using memory {torch.cuda.memory_allocated():_} bytes after forward")
+            # print(f"Using memory {torch.cuda.memory_allocated():_} bytes after forward")
         regularizer_term = masked_model.regularization_loss()
         loss = metric_loss + regularizer_term * lambda_reg
         loss.backward()
@@ -113,8 +113,9 @@ def train_edge_sp(
                     statss.append(stats)
                 except: pass
             stats = {k: sum(s[k] for s in statss) / len(statss) for k in statss[0]}
-            with masked_model.with_fwd_hooks_and_new_cache(**test_context_args) as hooked_model:
-                test_metric_loss = all_task_things.validation_metric(hooked_model(all_task_things.test_data))
+            with torch.no_grad():
+                with masked_model.with_fwd_hooks_and_new_cache(**test_context_args) as hooked_model:
+                    test_metric_loss = all_task_things.validation_metric(hooked_model(all_task_things.test_data))
             test_loss = test_metric_loss + regularizer_term * lambda_reg
 
             wandb.log({

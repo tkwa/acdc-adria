@@ -2,6 +2,7 @@ import torch
 from einops import rearrange
 from transformer_lens.ActivationCache import ActivationCache
 from transformer_lens.hook_points import HookPoint
+from torch.utils.checkpoint import checkpoint
 import math
 
 import wandb
@@ -250,8 +251,8 @@ class MaskedTransformer(torch.nn.Module):
         self.do_random_resample_caching(patch_data)
         self.ablation_cache.cache_dict = \
             {name: torch.zeros_like(scores) for name, scores in self.ablation_cache.cache_dict.items()}
-        self.a_cache_tensor = torch.cat([self.make_4d(self.ablation_cache[name]) for name in self.forward_cache_names], dim=2)
-        self.a_cache_tensor.requires_grad_(False)
+        # self.a_cache_tensor = torch.cat([self.make_4d(self.ablation_cache[name]) for name in self.forward_cache_names], dim=2)
+        # self.a_cache_tensor.requires_grad_(False)
 
     def do_random_resample_caching(self, patch_data) -> None:
         # Only cache the tensors needed to fill the masked out positions
@@ -259,8 +260,8 @@ class MaskedTransformer(torch.nn.Module):
             model_out, self.ablation_cache = self.model.run_with_cache(
                 patch_data, names_filter=lambda name: name in self.forward_cache_names, return_cache_object=True
             )
-            self.a_cache_tensor = torch.cat([self.make_4d(self.ablation_cache[name]) for name in self.forward_cache_names], dim=2)
-            self.a_cache_tensor.requires_grad_(False)
+            # self.a_cache_tensor = torch.cat([self.make_4d(self.ablation_cache[name]) for name in self.forward_cache_names], dim=2)
+            # self.a_cache_tensor.requires_grad_(False)
 
 
     def get_activation_values(self, names, cache:ActivationCache):
@@ -295,14 +296,9 @@ class MaskedTransformer(torch.nn.Module):
         mem1 = torch.cuda.memory_allocated()
         show(f"Using memory {mem1:_} bytes at hook start")
         is_attn = 'mlp' not in hook.name and 'resid_post' not in hook.name
-        mask = self.sample_mask(hook.name) # in_edges, nodes_per_mask, ...
-        if self.no_ablate: mask = torch.ones_like(mask) # for testing only
-
-        # Get values from ablation cache and forward cache
-        names = self.parent_node_names[hook.name]
 
         # memory optimization
-        out = torch.utils.checkpoint.checkpoint(self.compute_weighted_values, hook, use_reentrant=False)
+        out = checkpoint(self.compute_weighted_values, hook, use_reentrant=False)
         if not is_attn:
             out = rearrange(out, 'b s 1 d -> b s d')
 
